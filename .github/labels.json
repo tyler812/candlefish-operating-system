@@ -1,0 +1,97 @@
+[
+  {
+    "name": "spark",
+    "color": "FFB347",
+    "description": "Stage: Idea capture and qualification"
+  },
+  {
+    "name": "seed",
+    "color": "FFA500",
+    "description": "Stage: Feasibility validation"
+  },
+  {
+    "name": "scaffold",
+    "color": "FF8C00",
+    "description": "Stage: Building core functionality"
+  },
+  {
+    "name": "ship",
+    "color": "FF6347",
+    "description": "Stage: Polish and release"
+  },
+  {
+    "name": "scale",
+    "color": "DC143C",
+    "description": "Stage: Optimize and expand"
+  },
+  {
+    "name": "blocked",
+    "color": "D73A4A",
+    "description": "Work is blocked by dependency"
+  },
+  {
+    "name": "risk",
+    "color": "FF0000",
+    "description": "High risk item requiring attention"
+  },
+  {
+    "name": "kill-review",
+    "color": "000000",
+    "description": "Candidate for termination"
+  },
+  {
+    "name": "customer-impact",
+    "color": "B60205",
+    "description": "Directly affects customers"
+  },
+  {
+    "name": "needs-triage",
+    "color": "FBCA04",
+    "description": "Needs initial review"
+  },
+  {
+    "name": "decision",
+    "color": "3A3A60",
+    "description": "Decision memo required"
+  },
+  {
+    "name": "ops",
+    "color": "0E8A16",
+    "description": "Operational task"
+  },
+  {
+    "name": "remarkable",
+    "color": "FFD700",
+    "description": "Meets Minimum Remarkable standard"
+  },
+  {
+    "name": "crown-trophy",
+    "color": "4B0082",
+    "description": "Crown Trophy pod"
+  },
+  {
+    "name": "paintbox",
+    "color": "FF69B4",
+    "description": "Paintbox pod"
+  },
+  {
+    "name": "promoteros",
+    "color": "00CED1",
+    "description": "PromoterOS pod"
+  },
+  {
+    "name": "ratio",
+    "color": "8B4513",
+    "description": "Ratio Brewing pod"
+  },
+  {
+    "name": "integrator-pod",
+    "color": "6A0DAD",
+    "description": "Requires Integrator Pod review"
+  },
+  {
+    "name": "wip-limit",
+    "color": "FF4500",
+    "description": "At or exceeding WIP limits"
+  }
+]
