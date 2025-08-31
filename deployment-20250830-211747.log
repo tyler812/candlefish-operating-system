@@ -1,0 +1,7 @@
+========================================
+Candlefish Operating System v2.0
+Master Deployment Script
+========================================
+[0;34m[2025-08-30 21:17:47][0m Checking prerequisites...
+[0;32m✅ All prerequisites met[0m
+[0;34m[2025-08-30 21:17:47][0m Deploying AWS infrastructure with Terraform...

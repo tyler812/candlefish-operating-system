@@ -13,13 +13,21 @@ terraform {
 }
 
 # Backend configuration for state management
+# Uncomment this block when S3 backend is ready
+# terraform {
+#   backend "s3" {
+#     bucket         = "candlefish-terraform-state"
+#     key            = "clos-v2/terraform.tfstate"
+#     region         = "us-east-1"
+#     dynamodb_table = "candlefish-terraform-locks"
+#     encrypt        = true
+#   }
+# }
+
+# For now, using local backend
 terraform {
-  backend "s3" {
-    bucket         = "candlefish-terraform-state"
-    key            = "clos-v2/terraform.tfstate"
-    region         = "us-east-1"
-    dynamodb_table = "candlefish-terraform-locks"
-    encrypt        = true
+  backend "local" {
+    path = "terraform.tfstate"
   }
 }
 

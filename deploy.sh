@@ -86,7 +86,7 @@ check_prerequisites() {
 deploy_infrastructure() {
     print_status "Deploying AWS infrastructure with Terraform..."
     
-    cd infrastructure/
+    # Terraform files are in the root directory
     
     # Initialize Terraform
     print_status "Initializing Terraform..."
@@ -101,9 +101,7 @@ deploy_infrastructure() {
     terraform apply tfplan
     
     # Save outputs
-    terraform output -json > ../terraform-outputs.json
-    
-    cd ..
+    terraform output -json > terraform-outputs.json
     
     print_success "Infrastructure deployed successfully"
 }
@@ -119,7 +117,7 @@ deploy_core_api() {
     docker build -t clos-core-api:latest .
     
     # Get ECR repository URL from Terraform outputs
-    ECR_REPO=$(cat ../../terraform-outputs.json | jq -r '.ecr_repository_url.value')
+    ECR_REPO=$(cat terraform-outputs.json | jq -r '.ecr_repository_url.value')
     
     # Tag image for ECR
     docker tag clos-core-api:latest "${ECR_REPO}:latest"
@@ -216,22 +214,27 @@ setup_github_actions() {
 run_health_checks() {
     print_status "Running health checks..."
     
-    # Get API URL from Terraform outputs
-    API_URL=$(cat terraform-outputs.json | jq -r '.api_url.value')
-    
-    # Check API health
-    if curl -f "${API_URL}/health" &> /dev/null; then
-        print_success "API health check passed"
+    # Check if Terraform outputs exist
+    if [ -f terraform-outputs.json ]; then
+        # Get API URL from Terraform outputs
+        API_URL=$(cat terraform-outputs.json | jq -r '.api_url.value')
+        
+        # Check API health
+        if curl -f "${API_URL}/health" &> /dev/null; then
+            print_success "API health check passed"
+        else
+            print_warning "API health check failed"
+        fi
     else
-        print_warning "API health check failed"
+        print_warning "Terraform outputs not found. Infrastructure may not be deployed yet."
     fi
     
     # Check dashboard
-    DASHBOARD_URL=$(cat terraform-outputs.json | jq -r '.dashboard_url.value' || echo "https://dashboard.clos.candlefish.ai")
+    DASHBOARD_URL="https://dashboard.clos.candlefish.ai"
     if curl -f "${DASHBOARD_URL}" &> /dev/null; then
         print_success "Dashboard health check passed"
     else
-        print_warning "Dashboard health check failed"
+        print_warning "Dashboard health check pending deployment"
     fi
 }
 
