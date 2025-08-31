@@ -1,0 +1,208 @@
+{
+  "version": "1.0",
+  "generated": "2025-08-31",
+  "database": "Notion",
+  "table_name": "Candlefish Idea Ledger",
+  "properties": {
+    "title": {
+      "type": "title",
+      "required": true,
+      "description": "Brief, compelling name for the idea"
+    },
+    "problem_statement": {
+      "type": "rich_text",
+      "required": true,
+      "description": "What problem does this solve?"
+    },
+    "hypothesis": {
+      "type": "rich_text",
+      "required": true,
+      "description": "What do we believe will happen?"
+    },
+    "impact": {
+      "type": "select",
+      "required": true,
+      "options": [
+        {"name": "1 - Minimal", "color": "gray"},
+        {"name": "2 - Low", "color": "yellow"},
+        {"name": "3 - Medium", "color": "orange"},
+        {"name": "4 - High", "color": "red"},
+        {"name": "5 - Transformative", "color": "purple"}
+      ],
+      "description": "Potential business impact (1-5)"
+    },
+    "effort": {
+      "type": "select",
+      "required": true,
+      "options": [
+        {"name": "1 - Hours", "color": "green"},
+        {"name": "2 - Days", "color": "yellow"},
+        {"name": "3 - Weeks", "color": "orange"},
+        {"name": "4 - Months", "color": "red"},
+        {"name": "5 - Quarters", "color": "purple"}
+      ],
+      "description": "Estimated effort required (1-5)"
+    },
+    "strategic_fit": {
+      "type": "select",
+      "required": true,
+      "options": [
+        {"name": "1 - Misaligned", "color": "red"},
+        {"name": "2 - Tangential", "color": "orange"},
+        {"name": "3 - Aligned", "color": "yellow"},
+        {"name": "4 - Core", "color": "green"},
+        {"name": "5 - Critical", "color": "purple"}
+      ],
+      "description": "Alignment with strategy (1-5)"
+    },
+    "score": {
+      "type": "formula",
+      "formula": "(prop('Impact') * prop('Strategic Fit')) / prop('Effort')",
+      "description": "Auto-calculated priority score"
+    },
+    "gate": {
+      "type": "select",
+      "options": [
+        {"name": "Spark", "color": "yellow"},
+        {"name": "Seed", "color": "orange"},
+        {"name": "Scaffold", "color": "blue"},
+        {"name": "Ship", "color": "green"},
+        {"name": "Scale", "color": "purple"},
+        {"name": "Killed", "color": "red"},
+        {"name": "Parked", "color": "gray"}
+      ],
+      "default": "Spark",
+      "description": "Current stage gate"
+    },
+    "owner": {
+      "type": "person",
+      "description": "Who owns this idea?"
+    },
+    "pod": {
+      "type": "select",
+      "options": [
+        {"name": "Crown Trophy", "color": "purple"},
+        {"name": "Paintbox", "color": "pink"},
+        {"name": "PromoterOS", "color": "blue"},
+        {"name": "Ratio", "color": "brown"},
+        {"name": "Platform", "color": "gray"}
+      ],
+      "description": "Which pod will execute?"
+    },
+    "next_review": {
+      "type": "date",
+      "description": "When to review next"
+    },
+    "kill_criteria": {
+      "type": "rich_text",
+      "description": "What would cause us to kill this?"
+    },
+    "decision_memo": {
+      "type": "url",
+      "description": "Link to decision memo"
+    },
+    "github_issue": {
+      "type": "url",
+      "description": "Link to GitHub issue"
+    },
+    "demo_link": {
+      "type": "url",
+      "description": "Link to demo recording"
+    },
+    "created": {
+      "type": "created_time",
+      "description": "When idea was submitted"
+    },
+    "updated": {
+      "type": "last_edited_time",
+      "description": "Last modification"
+    },
+    "tags": {
+      "type": "multi_select",
+      "options": [
+        {"name": "AI/ML", "color": "purple"},
+        {"name": "Automation", "color": "blue"},
+        {"name": "Customer-Facing", "color": "green"},
+        {"name": "Infrastructure", "color": "gray"},
+        {"name": "Performance", "color": "orange"},
+        {"name": "Revenue", "color": "red"},
+        {"name": "Cost-Reduction", "color": "yellow"},
+        {"name": "Technical-Debt", "color": "brown"},
+        {"name": "Innovation", "color": "pink"}
+      ],
+      "description": "Categorization tags"
+    },
+    "customer_request": {
+      "type": "checkbox",
+      "description": "Requested by customer?"
+    },
+    "revenue_impact": {
+      "type": "number",
+      "format": "dollar",
+      "description": "Estimated revenue impact"
+    },
+    "confidence": {
+      "type": "select",
+      "options": [
+        {"name": "Low", "color": "red"},
+        {"name": "Medium", "color": "yellow"},
+        {"name": "High", "color": "green"}
+      ],
+      "description": "Confidence in estimates"
+    }
+  },
+  "views": [
+    {
+      "name": "Active Pipeline",
+      "type": "board",
+      "group_by": "gate",
+      "filter": "gate != 'Killed' AND gate != 'Parked'",
+      "sort": "score DESC"
+    },
+    {
+      "name": "High Priority",
+      "type": "table",
+      "filter": "score > 3",
+      "sort": "score DESC",
+      "columns": ["title", "pod", "owner", "score", "gate", "next_review"]
+    },
+    {
+      "name": "Needs Review",
+      "type": "table",
+      "filter": "next_review <= TODAY()",
+      "sort": "next_review ASC"
+    },
+    {
+      "name": "By Pod",
+      "type": "board",
+      "group_by": "pod",
+      "filter": "gate != 'Killed'",
+      "sort": "score DESC"
+    },
+    {
+      "name": "Customer Requests",
+      "type": "table",
+      "filter": "customer_request = true",
+      "sort": "created DESC"
+    }
+  ],
+  "automations": [
+    {
+      "trigger": "on_create",
+      "action": "set_next_review",
+      "value": "7_days_from_now"
+    },
+    {
+      "trigger": "gate_change",
+      "condition": "gate = 'Killed'",
+      "action": "notify",
+      "recipients": ["owner", "pod_lead"]
+    },
+    {
+      "trigger": "daily",
+      "condition": "next_review < TODAY() AND gate != 'Killed'",
+      "action": "notify",
+      "recipients": ["owner"]
+    }
+  ]
+}

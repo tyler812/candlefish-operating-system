@@ -1,0 +1,11 @@
+Title,Problem Statement,Hypothesis,Impact,Effort,Strategic Fit,Gate,Pod,Owner,Kill Criteria,Tags
+"AI-Powered Engraving Preview","Customers can't visualize custom engravings before purchase","Real-time AI preview will increase conversion by 25%",4,3,5,Seed,Crown Trophy,@sarah,"Conversion increase <10%","AI/ML,Customer-Facing,Revenue"
+"Contractor Skills Marketplace","Contractors struggle to find specialized subcontractors","Marketplace matching will reduce project delays by 30%",5,4,4,Scaffold,Paintbox,@mike,"Match rate <50%","Automation,Customer-Facing"
+"Venue Capacity Optimizer","Venues leave money on table with poor capacity planning","Dynamic pricing will increase revenue per event by 15%",4,3,4,Spark,PromoterOS,@alex,"Revenue increase <5%","AI/ML,Revenue"
+"Brew Recipe Version Control","Brewers lose recipe iterations and can't track what worked","Git-like versioning will reduce recipe failures by 40%",3,2,5,Scaffold,Ratio,@james,"Adoption <20% of users","Technical-Debt,Customer-Facing"
+"Unified Auth System","Each pod maintains separate auth causing security gaps","Centralized auth will reduce security incidents to zero",5,4,5,Ship,Platform,@integrator-pod,"Security incidents persist","Infrastructure,Technical-Debt"
+"Mobile Photo Capture Flow","Field workers can't efficiently document inventory items","Native mobile capture will speed documentation by 50%",4,3,4,Scaffold,Crown Trophy,@lisa,"Speed improvement <20%","Customer-Facing,Performance"
+"Smart Contract Generator","Painters spend hours on contract customization","Template engine will reduce contract time to 5 minutes",4,3,5,Seed,Paintbox,@tom,"Time savings <50%","Automation,Revenue"
+"Artist Booking Recommendation","Promoters don't know which artists will sell","ML recommendations will improve booking success by 35%",5,5,4,Spark,PromoterOS,@maria,"Success rate unchanged","AI/ML,Revenue,Innovation"
+"Inventory Forecasting","Breweries over/under order ingredients","Demand prediction will reduce waste by 25%",3,3,4,Seed,Ratio,@david,"Waste reduction <10%","AI/ML,Cost-Reduction"
+"Performance Monitoring Dashboard","Can't identify bottlenecks until customers complain","Proactive monitoring will reduce incidents by 60%",4,2,5,Ship,Platform,@ops-team,"Incident reduction <30%","Infrastructure,Performance"
