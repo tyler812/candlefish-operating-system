@@ -1,0 +1,484 @@
+name: CLOS Idea Ledger Processing
+on:
+  issues:
+    types: [opened, edited, labeled]
+  pull_request:
+    types: [opened, edited]
+    branches: [main, 'idea/**', 'spark/**']
+  workflow_dispatch:
+    inputs:
+      evaluation_type:
+        description: 'Type of evaluation to run'
+        required: true
+        default: 'full_scan'
+        type: choice
+        options:
+        - full_scan
+        - single_idea
+        - batch_process
+      idea_id:
+        description: 'Specific idea ID (for single_idea)'
+        required: false
+        type: string
+
+env:
+  CLOS_API_BASE: ${{ secrets.CLOS_API_BASE_URL || 'https://api.candlefish.ai' }}
+  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+  NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+
+jobs:
+  extract-idea-data:
+    runs-on: ubuntu-latest
+    outputs:
+      has_idea: ${{ steps.extract.outputs.has_idea }}
+      idea_title: ${{ steps.extract.outputs.title }}
+      problem_statement: ${{ steps.extract.outputs.problem }}
+      hypothesis: ${{ steps.extract.outputs.hypothesis }}
+      idea_body: ${{ steps.extract.outputs.body }}
+      author: ${{ steps.extract.outputs.author }}
+      idea_type: ${{ steps.extract.outputs.type }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Extract Idea Information
+        id: extract
+        run: |
+          evaluation_type="${{ inputs.evaluation_type || 'auto' }}"
+          
+          if [[ "${{ github.event_name }}" == "issues" ]]; then
+            # Extract from issue
+            title="${{ github.event.issue.title }}"
+            body="${{ github.event.issue.body }}"
+            author="${{ github.event.issue.user.login }}"
+            labels=$(echo '${{ toJSON(github.event.issue.labels) }}' | jq -r '.[].name' | tr '\n' ',')
+            
+            # Check if it's an idea (has idea label or title starts with "Idea:")
+            if [[ "$labels" =~ idea ]] || [[ "$title" =~ ^Idea: ]] || [[ "$title" =~ ^💡 ]]; then
+              has_idea="true"
+              idea_type="issue"
+            else
+              has_idea="false"
+              idea_type="other"
+            fi
+            
+          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            # Extract from PR
+            title="${{ github.event.pull_request.title }}"
+            body="${{ github.event.pull_request.body }}"
+            author="${{ github.event.pull_request.user.login }}"
+            branch="${{ github.head_ref }}"
+            
+            # Check if it's an idea PR (idea/* or spark/* branch)
+            if [[ "$branch" =~ ^(idea|spark)/ ]]; then
+              has_idea="true"
+              idea_type="pull_request"
+            else
+              has_idea="false"
+              idea_type="other"
+            fi
+          else
+            # Workflow dispatch - scan for ideas
+            has_idea="true"
+            idea_type="scan"
+            title="Batch Idea Evaluation"
+            body="Evaluating multiple ideas"
+            author="${{ github.actor }}"
+          fi
+          
+          # Extract structured data from body
+          problem_statement=""
+          hypothesis=""
+          
+          if [[ -n "$body" ]]; then
+            # Look for problem statement patterns
+            problem_statement=$(echo "$body" | grep -i "problem\|pain\|challenge" | head -1 | sed 's/^[#*-]*//' | xargs)
+            
+            # Look for hypothesis patterns  
+            hypothesis=$(echo "$body" | grep -i "hypothesis\|solution\|approach" | head -1 | sed 's/^[#*-]*//' | xargs)
+          fi
+          
+          # Output extracted data
+          echo "has_idea=$has_idea" >> $GITHUB_OUTPUT
+          echo "title=$title" >> $GITHUB_OUTPUT
+          echo "problem=$problem_statement" >> $GITHUB_OUTPUT
+          echo "hypothesis=$hypothesis" >> $GITHUB_OUTPUT
+          echo "body=$body" >> $GITHUB_OUTPUT
+          echo "author=$author" >> $GITHUB_OUTPUT
+          echo "type=$idea_type" >> $GITHUB_OUTPUT
+          
+          if [[ "$has_idea" == "true" ]]; then
+            echo "✅ Idea detected: $title" >> $GITHUB_STEP_SUMMARY
+            echo "📝 Type: $idea_type" >> $GITHUB_STEP_SUMMARY
+            echo "👤 Author: $author" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "ℹ️ No idea detected in this event" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  calculate-scores:
+    runs-on: ubuntu-latest
+    needs: extract-idea-data
+    if: needs.extract-idea-data.outputs.has_idea == 'true'
+    outputs:
+      impact_score: ${{ steps.score.outputs.impact }}
+      effort_score: ${{ steps.score.outputs.effort }}
+      strategic_fit_score: ${{ steps.score.outputs.strategic_fit }}
+      total_score: ${{ steps.score.outputs.total }}
+      feasibility_score: ${{ steps.score.outputs.feasibility }}
+      evaluation_details: ${{ steps.score.outputs.details }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Calculate Idea Scores
+        id: score
+        run: |
+          title="${{ needs.extract-idea-data.outputs.idea_title }}"
+          problem="${{ needs.extract-idea-data.outputs.problem_statement }}"
+          hypothesis="${{ needs.extract-idea-data.outputs.hypothesis }}"
+          body="${{ needs.extract-idea-data.outputs.idea_body }}"
+          author="${{ needs.extract-idea-data.outputs.author }}"
+          
+          echo "## 🧮 Calculating Idea Scores" >> $GITHUB_STEP_SUMMARY
+          
+          # Initialize scores
+          impact_score=0
+          effort_score=0
+          strategic_fit_score=0
+          feasibility_score=0
+          
+          # IMPACT SCORING (1-5 scale)
+          # Check for impact indicators in content
+          impact_keywords=("revenue|profit|cost.saving|efficiency|user.growth|retention|scale|market")
+          
+          for keyword in ${impact_keywords[@]}; do
+            if echo "$body" | grep -iE "$keyword" > /dev/null; then
+              impact_score=$((impact_score + 1))
+            fi
+          done
+          
+          # Bonus for specific metrics mentioned
+          if echo "$body" | grep -E "[0-9]+%" > /dev/null; then
+            impact_score=$((impact_score + 1))
+          fi
+          
+          # Cap at 5
+          impact_score=$([[ $impact_score -gt 5 ]] && echo 5 || echo $impact_score)
+          
+          # EFFORT SCORING (1-5 scale, inverted - lower is better)
+          effort_score=3 # Default moderate effort
+          
+          # Check for effort indicators
+          if echo "$body" | grep -iE "simple|quick|easy|hours|day" > /dev/null; then
+            effort_score=1
+          elif echo "$body" | grep -iE "complex|difficult|months|team|infrastructure" > /dev/null; then
+            effort_score=5
+          elif echo "$body" | grep -iE "week|sprint|moderate" > /dev/null; then
+            effort_score=2
+          fi
+          
+          # STRATEGIC FIT SCORING (1-5 scale)
+          strategic_fit_score=3 # Default neutral
+          
+          # Check alignment with CLOS goals
+          strategic_keywords=("automation|workflow|productivity|process|efficiency|collaboration|unblock")
+          
+          for keyword in ${strategic_keywords[@]}; do
+            if echo "$body" | grep -iE "$keyword" > /dev/null; then
+              strategic_fit_score=$((strategic_fit_score + 1))
+            fi
+          done
+          
+          # Cap at 5
+          strategic_fit_score=$([[ $strategic_fit_score -gt 5 ]] && echo 5 || echo $strategic_fit_score)
+          
+          # FEASIBILITY SCORING (1-5 scale)
+          feasibility_score=3 # Default moderate
+          
+          # Check for feasibility indicators
+          if echo "$body" | grep -iE "prototype|proof.of.concept|spike|experiment" > /dev/null; then
+            feasibility_score=$((feasibility_score + 1))
+          fi
+          
+          if echo "$body" | grep -iE "dependencies|blocker|unknown|research" > /dev/null; then
+            feasibility_score=$((feasibility_score - 1))
+          fi
+          
+          # Ensure bounds
+          feasibility_score=$([[ $feasibility_score -lt 1 ]] && echo 1 || echo $feasibility_score)
+          feasibility_score=$([[ $feasibility_score -gt 5 ]] && echo 5 || echo $feasibility_score)
+          
+          # TOTAL SCORE CALCULATION
+          # Weighted: Impact(40%) + Strategic Fit(30%) + Feasibility(20%) + Effort(10%, inverted)
+          effort_inverted=$((6 - effort_score))
+          total_score=$(( (impact_score * 40 + strategic_fit_score * 30 + feasibility_score * 20 + effort_inverted * 10) / 100 ))
+          
+          # Output scores
+          echo "impact=$impact_score" >> $GITHUB_OUTPUT
+          echo "effort=$effort_score" >> $GITHUB_OUTPUT
+          echo "strategic_fit=$strategic_fit_score" >> $GITHUB_OUTPUT
+          echo "feasibility=$feasibility_score" >> $GITHUB_OUTPUT
+          echo "total=$total_score" >> $GITHUB_OUTPUT
+          
+          # Generate evaluation details
+          details="Impact: $impact_score/5, Strategic Fit: $strategic_fit_score/5, Feasibility: $feasibility_score/5, Effort: $effort_score/5"
+          echo "details=$details" >> $GITHUB_OUTPUT
+          
+          # Add to summary
+          echo "### Scoring Results" >> $GITHUB_STEP_SUMMARY
+          echo "- **Impact Score:** $impact_score/5" >> $GITHUB_STEP_SUMMARY
+          echo "- **Strategic Fit:** $strategic_fit_score/5" >> $GITHUB_STEP_SUMMARY
+          echo "- **Feasibility:** $feasibility_score/5" >> $GITHUB_STEP_SUMMARY
+          echo "- **Effort:** $effort_score/5 (lower is better)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Total Score:** $total_score/5" >> $GITHUB_STEP_SUMMARY
+
+  make-promotion-decision:
+    runs-on: ubuntu-latest
+    needs: [extract-idea-data, calculate-scores]
+    outputs:
+      decision: ${{ steps.decision.outputs.decision }}
+      recommendation: ${{ steps.decision.outputs.recommendation }}
+      action_required: ${{ steps.decision.outputs.action_required }}
+    steps:
+      - name: Make Promotion Decision
+        id: decision
+        run: |
+          impact="${{ needs.calculate-scores.outputs.impact_score }}"
+          strategic_fit="${{ needs.calculate-scores.outputs.strategic_fit_score }}"
+          feasibility="${{ needs.calculate-scores.outputs.feasibility_score }}"
+          total="${{ needs.calculate-scores.outputs.total_score }}"
+          
+          # Load promotion criteria from stage-gates.yaml
+          min_impact=$(yq eval '.gates.spark.exit_criteria | to_entries[] | select(.key == "impact_score") | .value' stage-gates.yaml | sed 's/>=//g' || echo "3")
+          min_strategic_fit=$(yq eval '.gates.spark.exit_criteria | to_entries[] | select(.key == "strategic_fit_score") | .value' stage-gates.yaml | sed 's/>=//g' || echo "3")
+          
+          echo "## 🎯 Promotion Decision Analysis" >> $GITHUB_STEP_SUMMARY
+          echo "- Minimum Impact Required: $min_impact" >> $GITHUB_STEP_SUMMARY
+          echo "- Minimum Strategic Fit Required: $min_strategic_fit" >> $GITHUB_STEP_SUMMARY
+          
+          # Decision logic
+          if [[ "$impact" -ge "$min_impact" ]] && [[ "$strategic_fit" -ge "$min_strategic_fit" ]] && [[ "$total" -ge 3 ]]; then
+            decision="PROMOTE"
+            recommendation="This idea meets promotion criteria and should advance to SEED stage"
+            action_required="promote_to_seed"
+          elif [[ "$total" -ge 2 ]] && [[ "$feasibility" -ge 3 ]]; then
+            decision="INCUBATE"
+            recommendation="This idea has potential but needs more development before promotion"
+            action_required="request_more_info"
+          else
+            decision="ARCHIVE"
+            recommendation="This idea does not meet minimum criteria for advancement"
+            action_required="archive_idea"
+          fi
+          
+          echo "decision=$decision" >> $GITHUB_OUTPUT
+          echo "recommendation=$recommendation" >> $GITHUB_OUTPUT
+          echo "action_required=$action_required" >> $GITHUB_OUTPUT
+          
+          # Add to summary
+          echo "### Decision: $decision" >> $GITHUB_STEP_SUMMARY
+          echo "$recommendation" >> $GITHUB_STEP_SUMMARY
+
+  execute-promotion-action:
+    runs-on: ubuntu-latest
+    needs: [extract-idea-data, calculate-scores, make-promotion-decision]
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Execute Promotion Action
+        run: |
+          decision="${{ needs.make-promotion-decision.outputs.decision }}"
+          action="${{ needs.make-promotion-decision.outputs.action_required }}"
+          title="${{ needs.extract-idea-data.outputs.idea_title }}"
+          author="${{ needs.extract-idea-data.outputs.author }}"
+          idea_type="${{ needs.extract-idea-data.outputs.type }}"
+          
+          case "$action" in
+            "promote_to_seed")
+              echo "🚀 Promoting idea to SEED stage" >> $GITHUB_STEP_SUMMARY
+              
+              if [[ "$idea_type" == "issue" ]]; then
+                issue_number="${{ github.event.issue.number }}"
+                
+                # Add promotion labels
+                gh issue edit $issue_number \
+                  --add-label "stage/seed,promoted,CLOS-evaluated" \
+                  --remove-label "stage/spark,idea"
+                
+                # Add promotion comment
+                gh issue comment $issue_number --body "## 🎉 Idea Promoted to SEED Stage!
+
+**Evaluation Results:**
+- Impact Score: ${{ needs.calculate-scores.outputs.impact_score }}/5
+- Strategic Fit: ${{ needs.calculate-scores.outputs.strategic_fit_score }}/5
+- Feasibility: ${{ needs.calculate-scores.outputs.feasibility_score }}/5
+- Total Score: ${{ needs.calculate-scores.outputs.total_score }}/5
+
+**Recommendation:** ${{ needs.make-promotion-decision.outputs.recommendation }}
+
+**Next Steps:**
+1. Create technical spike to validate feasibility
+2. Define acceptance criteria
+3. Estimate effort required
+4. Identify dependencies
+
+This idea has been automatically promoted based on CLOS evaluation criteria. A pod lead will be assigned to guide the next phase.
+
+*Automated by CLOS v2.0 Idea Evaluation*"
+                
+              elif [[ "$idea_type" == "pull_request" ]]; then
+                pr_number="${{ github.event.pull_request.number }}"
+                
+                # Add promotion labels
+                gh pr edit $pr_number \
+                  --add-label "stage/seed,promoted,CLOS-evaluated"
+                
+                # Add promotion comment
+                gh pr comment $pr_number --body "## 🎉 Idea Promoted to SEED Stage!
+
+This PR-based idea has met our promotion criteria and is ready for the next phase.
+
+**Evaluation Results:**
+- Impact Score: ${{ needs.calculate-scores.outputs.impact_score }}/5
+- Strategic Fit: ${{ needs.calculate-scores.outputs.strategic_fit_score }}/5
+- Feasibility: ${{ needs.calculate-scores.outputs.feasibility_score }}/5
+
+*Automated by CLOS v2.0 Idea Evaluation*"
+              fi
+              ;;
+              
+            "request_more_info")
+              echo "📋 Requesting more information" >> $GITHUB_STEP_SUMMARY
+              
+              if [[ "$idea_type" == "issue" ]]; then
+                issue_number="${{ github.event.issue.number }}"
+                
+                gh issue edit $issue_number --add-label "needs-more-info,CLOS-evaluated"
+                
+                gh issue comment $issue_number --body "## 📋 More Information Needed
+
+Your idea shows promise but needs additional details to proceed through our evaluation process.
+
+**Current Scores:**
+- Impact Score: ${{ needs.calculate-scores.outputs.impact_score }}/5
+- Strategic Fit: ${{ needs.calculate-scores.outputs.strategic_fit_score }}/5
+- Feasibility: ${{ needs.calculate-scores.outputs.feasibility_score }}/5
+
+**To improve your idea's evaluation, please provide:**
+
+1. **Specific Impact Metrics**: What measurable outcomes do you expect?
+2. **Implementation Approach**: How would you build/implement this?
+3. **Success Criteria**: How will we know if this idea succeeds?
+4. **User Stories**: Who benefits and how?
+
+Update this issue with additional details and remove the \`needs-more-info\` label when ready for re-evaluation.
+
+*Automated by CLOS v2.0 Idea Evaluation*"
+              fi
+              ;;
+              
+            "archive_idea")
+              echo "🗄️ Archiving idea" >> $GITHUB_STEP_SUMMARY
+              
+              if [[ "$idea_type" == "issue" ]]; then
+                issue_number="${{ github.event.issue.number }}"
+                
+                gh issue edit $issue_number --add-label "archived,CLOS-evaluated"
+                
+                gh issue comment $issue_number --body "## 🗄️ Idea Archived
+
+After evaluation, this idea does not currently meet our criteria for advancement.
+
+**Evaluation Results:**
+- Impact Score: ${{ needs.calculate-scores.outputs.impact_score }}/5 (need ≥3)
+- Strategic Fit: ${{ needs.calculate-scores.outputs.strategic_fit_score }}/5 (need ≥3)
+- Total Score: ${{ needs.calculate-scores.outputs.total_score }}/5
+
+**This doesn't mean it's a bad idea!** Consider:
+1. Refining the problem statement and impact metrics
+2. Aligning more closely with our strategic priorities
+3. Breaking it down into smaller, more feasible pieces
+4. Gathering more validation from potential users
+
+You can always resubmit with improvements or discuss with the Integrator Pod.
+
+*Automated by CLOS v2.0 Idea Evaluation*"
+                
+                # Close the issue after 48 hours (would be handled by scheduler)
+                curl -s -X POST "$CLOS_API_BASE/schedule/task" \
+                  -H "Authorization: Bearer ${{ secrets.CLOS_API_TOKEN }}" \
+                  -H "Content-Type: application/json" \
+                  -d "{
+                    \"task_type\": \"close_issue\",
+                    \"scheduled_time\": \"$(date -d '+48 hours' +%s)\",
+                    \"parameters\": {
+                      \"repository\": \"${{ github.repository }}\",
+                      \"issue_number\": $issue_number
+                    }
+                  }" || true
+              fi
+              ;;
+          esac
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  update-idea-ledger:
+    runs-on: ubuntu-latest
+    needs: [extract-idea-data, calculate-scores, make-promotion-decision]
+    steps:
+      - name: Update CLOS Idea Ledger
+        run: |
+          # Send idea data to CLOS API for tracking
+          curl -s -X POST "$CLOS_API_BASE/ideas/evaluate" \
+            -H "Authorization: Bearer ${{ secrets.CLOS_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"title\": \"${{ needs.extract-idea-data.outputs.idea_title }}\",
+              \"author\": \"${{ needs.extract-idea-data.outputs.author }}\",
+              \"type\": \"${{ needs.extract-idea-data.outputs.type }}\",
+              \"problem_statement\": \"${{ needs.extract-idea-data.outputs.problem_statement }}\",
+              \"hypothesis\": \"${{ needs.extract-idea-data.outputs.hypothesis }}\",
+              \"scores\": {
+                \"impact\": ${{ needs.calculate-scores.outputs.impact_score }},
+                \"strategic_fit\": ${{ needs.calculate-scores.outputs.strategic_fit_score }},
+                \"feasibility\": ${{ needs.calculate-scores.outputs.feasibility_score }},
+                \"effort\": ${{ needs.calculate-scores.outputs.effort_score }},
+                \"total\": ${{ needs.calculate-scores.outputs.total_score }}
+              },
+              \"decision\": \"${{ needs.make-promotion-decision.outputs.decision }}\",
+              \"recommendation\": \"${{ needs.make-promotion-decision.outputs.recommendation }}\",
+              \"repository\": \"${{ github.repository }}\",
+              \"event_type\": \"${{ github.event_name }}\",
+              \"evaluation_time\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"
+            }" || true
+          
+          echo "📊 Idea ledger updated" >> $GITHUB_STEP_SUMMARY
+
+  notify-stakeholders:
+    runs-on: ubuntu-latest
+    needs: [extract-idea-data, calculate-scores, make-promotion-decision]
+    if: needs.make-promotion-decision.outputs.decision == 'PROMOTE'
+    steps:
+      - name: Notify Slack of Promoted Ideas
+        if: env.SLACK_WEBHOOK_URL
+        run: |
+          title="${{ needs.extract-idea-data.outputs.idea_title }}"
+          author="${{ needs.extract-idea-data.outputs.author }}"
+          total_score="${{ needs.calculate-scores.outputs.total_score }}"
+          
+          curl -X POST "$SLACK_WEBHOOK_URL" \
+            -H 'Content-type: application/json' \
+            -d "{
+              \"channel\": \"#engineering\",
+              \"text\": \"New idea promoted to SEED stage!\",
+              \"attachments\": [{
+                \"color\": \"good\",
+                \"title\": \"🚀 Idea Promoted: $title\",
+                \"text\": \"An idea has automatically advanced through our evaluation process.\",
+                \"fields\": [
+                  {\"title\": \"Author\", \"value\": \"@$author\", \"short\": true},
+                  {\"title\": \"Score\", \"value\": \"$total_score/5\", \"short\": true},
+                  {\"title\": \"Next Stage\", \"value\": \"SEED - Technical validation\", \"short\": true},
+                  {\"title\": \"Repository\", \"value\": \"${{ github.repository }}\", \"short\": true}
+                ],
+                \"footer\": \"CLOS v2.0 Idea Evaluation\"
+              }]
+            }" || true

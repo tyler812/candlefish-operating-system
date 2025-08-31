@@ -1,0 +1,355 @@
+name: CLOS Daily Unblock Standup
+on:
+  schedule:
+    # Run at 9:00 AM PST (17:00 UTC) on weekdays
+    - cron: '0 17 * * MON-FRI'
+  workflow_dispatch:
+    inputs:
+      date_override:
+        description: 'Date for standup (YYYY-MM-DD)'
+        required: false
+        type: string
+      force_create:
+        description: 'Force create even if weekend'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  CLOS_API_BASE: ${{ secrets.CLOS_API_BASE_URL || 'https://api.candlefish.ai' }}
+  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+  SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+
+jobs:
+  check-schedule:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.schedule.outputs.should_run }}
+      standup_date: ${{ steps.schedule.outputs.date }}
+      is_weekend: ${{ steps.schedule.outputs.is_weekend }}
+    steps:
+      - name: Check Schedule
+        id: schedule
+        run: |
+          if [[ -n "${{ inputs.date_override }}" ]]; then
+            standup_date="${{ inputs.date_override }}"
+          else
+            standup_date=$(date +%Y-%m-%d)
+          fi
+          
+          # Check if it's a weekend
+          day_of_week=$(date -d "$standup_date" +%u)
+          is_weekend=$([[ "$day_of_week" -gt 5 ]] && echo "true" || echo "false")
+          
+          # Should run if it's not weekend OR force_create is true
+          should_run=$([[ "$is_weekend" == "false" ]] || [[ "${{ inputs.force_create }}" == "true" ]] && echo "true" || echo "false")
+          
+          echo "date=$standup_date" >> $GITHUB_OUTPUT
+          echo "is_weekend=$is_weekend" >> $GITHUB_OUTPUT
+          echo "should_run=$should_run" >> $GITHUB_OUTPUT
+          
+          echo "Standup date: $standup_date" >> $GITHUB_STEP_SUMMARY
+          echo "Is weekend: $is_weekend" >> $GITHUB_STEP_SUMMARY
+          echo "Should run: $should_run" >> $GITHUB_STEP_SUMMARY
+
+  collect-blockers:
+    runs-on: ubuntu-latest
+    needs: check-schedule
+    if: needs.check-schedule.outputs.should_run == 'true'
+    outputs:
+      blockers_found: ${{ steps.blockers.outputs.found }}
+      blocker_count: ${{ steps.blockers.outputs.count }}
+      wip_violations: ${{ steps.blockers.outputs.wip_violations }}
+      stale_prs: ${{ steps.blockers.outputs.stale_prs }}
+      failing_gates: ${{ steps.blockers.outputs.failing_gates }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Identify Current Blockers
+        id: blockers
+        run: |
+          standup_date="${{ needs.check-schedule.outputs.standup_date }}"
+          
+          echo "## 🔍 Scanning for Blockers - $standup_date" >> $GITHUB_STEP_SUMMARY
+          
+          total_blockers=0
+          
+          # 1. Find PRs blocked by WIP limits
+          echo "### WIP Limit Violations" >> $GITHUB_STEP_SUMMARY
+          wip_blocked=$(gh pr list --state open --label "blocked/wip-limit-exceeded" --json number,title,author | \
+            jq -r '.[] | "- PR #\(.number): \(.title) (@\(.author.login))"' || echo "")
+          
+          if [[ -n "$wip_blocked" ]]; then
+            echo "$wip_blocked" >> $GITHUB_STEP_SUMMARY
+            wip_count=$(echo "$wip_blocked" | wc -l)
+            total_blockers=$((total_blockers + wip_count))
+          else
+            echo "- None found ✅" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # 2. Find PRs blocked by failing stage gates
+          echo "### Stage Gate Failures" >> $GITHUB_STEP_SUMMARY
+          gate_blocked=$(gh pr list --state open --label "gate/.*-blocked" --json number,title,author,labels | \
+            jq -r '.[] | "- PR #\(.number): \(.title) (@\(.author.login)) - " + (.labels[] | select(.name | contains("gate") and contains("blocked")) | .name)' || echo "")
+          
+          if [[ -n "$gate_blocked" ]]; then
+            echo "$gate_blocked" >> $GITHUB_STEP_SUMMARY
+            gate_count=$(echo "$gate_blocked" | wc -l)
+            total_blockers=$((total_blockers + gate_count))
+          else
+            echo "- None found ✅" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # 3. Find stale PRs (no activity in 5+ days)
+          echo "### Stale PRs (5+ days without activity)" >> $GITHUB_STEP_SUMMARY
+          cutoff_date=$(date -d '5 days ago' +%Y-%m-%d)
+          
+          stale_prs=$(gh pr list --state open --json number,title,author,updatedAt | \
+            jq -r --arg cutoff "$cutoff_date" '.[] | select(.updatedAt < $cutoff) | "- PR #\(.number): \(.title) (@\(.author.login)) - Last updated: \(.updatedAt[:10])"' || echo "")
+          
+          if [[ -n "$stale_prs" ]]; then
+            echo "$stale_prs" >> $GITHUB_STEP_SUMMARY
+            stale_count=$(echo "$stale_prs" | wc -l)
+            total_blockers=$((total_blockers + stale_count))
+          else
+            echo "- None found ✅" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # 4. Find failing CI/CD jobs
+          echo "### Recent CI/CD Failures" >> $GITHUB_STEP_SUMMARY
+          failing_runs=$(gh run list --status failure --limit 5 --json displayTitle,workflowName,createdAt | \
+            jq -r '.[] | "- \(.workflowName): \(.displayTitle) - \(.createdAt[:10])"' || echo "")
+          
+          if [[ -n "$failing_runs" ]]; then
+            echo "$failing_runs" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- None found ✅" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Output results
+          echo "found=$([[ $total_blockers -gt 0 ]] && echo 'true' || echo 'false')" >> $GITHUB_OUTPUT
+          echo "count=$total_blockers" >> $GITHUB_OUTPUT
+          echo "wip_violations<<EOF" >> $GITHUB_OUTPUT
+          echo "$wip_blocked" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "stale_prs<<EOF" >> $GITHUB_OUTPUT
+          echo "$stale_prs" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "failing_gates<<EOF" >> $GITHUB_OUTPUT
+          echo "$gate_blocked" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+          echo "## 📊 Summary: $total_blockers total blockers found" >> $GITHUB_STEP_SUMMARY
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  create-standup-issue:
+    runs-on: ubuntu-latest
+    needs: [check-schedule, collect-blockers]
+    outputs:
+      issue_number: ${{ steps.issue.outputs.number }}
+      issue_url: ${{ steps.issue.outputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Create Daily Standup Issue
+        id: issue
+        run: |
+          standup_date="${{ needs.check-schedule.outputs.standup_date }}"
+          blocker_count="${{ needs.collect-blockers.outputs.blocker_count }}"
+          
+          # Generate standup issue body
+          cat > /tmp/standup_body.md << EOF
+# Daily Standup - $standup_date
+
+**Facilitator:** @integrator-team
+**Time:** 9:00 AM PST
+
+## 🎯 Today's Focus
+Comment below with your standup update using this format:
+
+### @your-username
+**Yesterday:** What did you accomplish?
+**Today:** What are you working on?
+**Blockers:** What's stopping you? (tag @integrator-team if urgent)
+
+## 🚧 Current Blockers ($blocker_count total)
+
+### WIP Limit Violations
+${{ needs.collect-blockers.outputs.wip_violations || '- None ✅' }}
+
+### Stage Gate Failures  
+${{ needs.collect-blockers.outputs.failing_gates || '- None ✅' }}
+
+### Stale PRs (5+ days)
+${{ needs.collect-blockers.outputs.stale_prs || '- None ✅' }}
+
+## 📋 Action Items
+- [ ] Review and resolve WIP limit violations
+- [ ] Address failing stage gates
+- [ ] Follow up on stale PRs
+- [ ] Update project boards
+
+## 🎉 Demo Friday Prep
+If you have something to demo this Friday, comment with:
+- **What:** Brief description
+- **Duration:** How many minutes
+- **Audience:** Who should attend
+
+---
+*This issue was created automatically by CLOS v2.0*
+*Will be auto-closed at end of day*
+EOF
+
+          # Create the issue
+          issue_url=$(gh issue create \
+            --title "Daily Standup - $standup_date" \
+            --body-file /tmp/standup_body.md \
+            --label "standup,daily,CLOS-generated" \
+            --assignee "@me")
+          
+          issue_number=$(echo "$issue_url" | grep -o '[0-9]\+$')
+          
+          echo "number=$issue_number" >> $GITHUB_OUTPUT
+          echo "url=$issue_url" >> $GITHUB_OUTPUT
+          
+          echo "✅ Created standup issue: #$issue_number" >> $GITHUB_STEP_SUMMARY
+          echo "📝 Issue URL: $issue_url" >> $GITHUB_STEP_SUMMARY
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  notify-slack:
+    runs-on: ubuntu-latest
+    needs: [check-schedule, collect-blockers, create-standup-issue]
+    steps:
+      - name: Post to Slack
+        if: env.SLACK_WEBHOOK_URL
+        run: |
+          standup_date="${{ needs.check-schedule.outputs.standup_date }}"
+          issue_number="${{ needs.create-standup-issue.outputs.issue_number }}"
+          issue_url="${{ needs.create-standup-issue.outputs.issue_url }}"
+          blocker_count="${{ needs.collect-blockers.outputs.blocker_count }}"
+          
+          # Determine urgency based on blocker count
+          if [[ "$blocker_count" -gt 5 ]]; then
+            color="danger"
+            urgency="🚨 HIGH"
+          elif [[ "$blocker_count" -gt 2 ]]; then
+            color="warning" 
+            urgency="⚠️ MEDIUM"
+          else
+            color="good"
+            urgency="✅ LOW"
+          fi
+          
+          curl -X POST "$SLACK_WEBHOOK_URL" \
+            -H 'Content-type: application/json' \
+            -d "{
+              \"channel\": \"#unblock-and-commit\",
+              \"text\": \"Daily Standup - $standup_date\",
+              \"attachments\": [{
+                \"color\": \"$color\",
+                \"title\": \"🌅 Daily Standup - $standup_date\",
+                \"title_link\": \"$issue_url\",
+                \"text\": \"Time for our daily unblock and commit!\",
+                \"fields\": [
+                  {\"title\": \"Blocker Alert\", \"value\": \"$urgency ($blocker_count blockers)\", \"short\": true},
+                  {\"title\": \"Issue\", \"value\": \"<$issue_url|#$issue_number>\", \"short\": true},
+                  {\"title\": \"Action Required\", \"value\": \"Please share your standup update in the issue\", \"short\": false}
+                ],
+                \"footer\": \"CLOS v2.0 Daily Automation\",
+                \"footer_icon\": \"https://cdn-icons-png.flaticon.com/512/25/25231.png\"
+              }]
+            }" || true
+          
+          echo "📢 Slack notification sent" >> $GITHUB_STEP_SUMMARY
+
+  post-reminder:
+    runs-on: ubuntu-latest
+    needs: [create-standup-issue, notify-slack]
+    if: needs.collect-blockers.outputs.blocker_count > 0
+    steps:
+      - name: Send Blocker Reminders
+        run: |
+          issue_number="${{ needs.create-standup-issue.outputs.issue_number }}"
+          
+          # Send individual notifications for high-priority blockers
+          wip_violations="${{ needs.collect-blockers.outputs.wip_violations }}"
+          
+          if [[ -n "$wip_violations" && "$wip_violations" != "- None ✅" ]]; then
+            # Extract usernames from WIP violations and notify them
+            while IFS= read -r line; do
+              if [[ "$line" =~ @([a-zA-Z0-9_-]+) ]]; then
+                username="${BASH_REMATCH[1]}"
+                
+                gh issue comment $issue_number --body "👋 @$username - You have work blocked by WIP limits. Please review your active PRs and consider closing or merging completed work to unblock the queue.
+
+**Next Steps:**
+1. Review your open PRs
+2. Merge or close completed work  
+3. Update your standup with blockers
+
+Need help? Tag @integrator-team"
+              fi
+            done <<< "$wip_violations"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  schedule-followup:
+    runs-on: ubuntu-latest
+    needs: [check-schedule, create-standup-issue]
+    steps:
+      - name: Schedule End of Day Cleanup
+        run: |
+          issue_number="${{ needs.create-standup-issue.outputs.issue_number }}"
+          standup_date="${{ needs.check-schedule.outputs.standup_date }}"
+          
+          # Create a scheduled comment for end of day
+          end_of_day=$(date -d "$standup_date 17:00" +%s)
+          current_time=$(date +%s)
+          
+          if [[ "$current_time" -lt "$end_of_day" ]]; then
+            echo "⏰ Issue #$issue_number will be auto-closed at 5 PM PST" >> $GITHUB_STEP_SUMMARY
+            
+            # Use CLOS API to schedule the closure
+            curl -s -X POST "$CLOS_API_BASE/schedule/task" \
+              -H "Authorization: Bearer ${{ secrets.CLOS_API_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              -d "{
+                \"task_type\": \"close_standup_issue\",
+                \"scheduled_time\": \"$end_of_day\",
+                \"parameters\": {
+                  \"repository\": \"${{ github.repository }}\",
+                  \"issue_number\": $issue_number,
+                  \"standup_date\": \"$standup_date\"
+                }
+              }" || true
+          else
+            echo "⚠️ Standup created after 5 PM, will not auto-close" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  update-metrics:
+    runs-on: ubuntu-latest
+    needs: [check-schedule, collect-blockers, create-standup-issue]
+    if: always()
+    steps:
+      - name: Update CLOS Metrics
+        run: |
+          # Send daily metrics to the CLOS API
+          curl -s -X POST "$CLOS_API_BASE/metrics/daily-standup" \
+            -H "Authorization: Bearer ${{ secrets.CLOS_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"date\": \"${{ needs.check-schedule.outputs.standup_date }}\",
+              \"repository\": \"${{ github.repository }}\",
+              \"total_blockers\": ${{ needs.collect-blockers.outputs.blocker_count || 0 }},
+              \"wip_violations\": \"${{ needs.collect-blockers.outputs.wip_violations }}\",
+              \"gate_failures\": \"${{ needs.collect-blockers.outputs.failing_gates }}\",
+              \"stale_prs\": \"${{ needs.collect-blockers.outputs.stale_prs }}\",
+              \"issue_created\": ${{ needs.create-standup-issue.outputs.issue_number || 0 }},
+              \"is_weekend\": ${{ needs.check-schedule.outputs.is_weekend }},
+              \"execution_time\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"
+            }" || true
+          
+          echo "📊 Metrics updated in CLOS dashboard" >> $GITHUB_STEP_SUMMARY

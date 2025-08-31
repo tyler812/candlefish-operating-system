@@ -1,0 +1,350 @@
+name: CLOS WIP Limits Enforcement
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+  issues:
+    types: [opened, reopened]
+  workflow_dispatch:
+    inputs:
+      check_type:
+        description: 'Check type (pod|person|portfolio)'
+        required: true
+        default: 'pod'
+        type: choice
+        options:
+        - pod
+        - person
+        - portfolio
+
+env:
+  CLOS_API_BASE: ${{ secrets.CLOS_API_BASE_URL || 'https://api.candlefish.ai' }}
+  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+jobs:
+  check-wip-limits:
+    runs-on: ubuntu-latest
+    outputs:
+      wip_status: ${{ steps.wip.outputs.status }}
+      current_wip: ${{ steps.wip.outputs.current }}
+      limit: ${{ steps.wip.outputs.limit }}
+      pod_name: ${{ steps.wip.outputs.pod }}
+      owner: ${{ steps.wip.outputs.owner }}
+      violators: ${{ steps.wip.outputs.violators }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Extract Metadata
+        id: metadata
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            owner="${{ github.event.pull_request.user.login }}"
+            pr_number="${{ github.event.pull_request.number }}"
+            
+            # Extract pod from PR labels
+            pod_name=$(gh pr view $pr_number --json labels --jq '.labels[] | select(.name | startswith("pod/")) | .name' | head -1 | cut -d'/' -f2 || echo "unknown")
+            
+            # Extract stage from PR labels or branch
+            stage=$(gh pr view $pr_number --json labels --jq '.labels[] | select(.name | startswith("stage/")) | .name' | head -1 | cut -d'/' -f2)
+            if [[ -z "$stage" ]]; then
+              branch_name="${{ github.head_ref }}"
+              case "$branch_name" in
+                spark/*|idea/*) stage="spark" ;;
+                seed/*|spike/*) stage="seed" ;;
+                scaffold/*|feature/*|build/*) stage="scaffold" ;;
+                ship/*|release/*|deploy/*) stage="ship" ;;
+                scale/*|optimize/*) stage="scale" ;;
+                *) stage="spark" ;;
+              esac
+            fi
+            
+          elif [[ "${{ github.event_name }}" == "issues" ]]; then
+            owner="${{ github.event.issue.user.login }}"
+            issue_number="${{ github.event.issue.number }}"
+            
+            # Extract pod from issue labels
+            pod_name=$(gh issue view $issue_number --json labels --jq '.labels[] | select(.name | startswith("pod/")) | .name' | head -1 | cut -d'/' -f2 || echo "unknown")
+            stage="spark" # Issues typically start at spark
+          else
+            owner="${{ github.actor }}"
+            pod_name="unknown"
+            stage="unknown"
+          fi
+          
+          echo "owner=$owner" >> $GITHUB_OUTPUT
+          echo "pod=$pod_name" >> $GITHUB_OUTPUT
+          echo "stage=$stage" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: Check WIP Limits
+        id: wip
+        run: |
+          owner="${{ steps.metadata.outputs.owner }}"
+          pod_name="${{ steps.metadata.outputs.pod }}"
+          stage="${{ steps.metadata.outputs.stage }}"
+          check_type="${{ inputs.check_type || 'pod' }}"
+          
+          echo "owner=$owner" >> $GITHUB_OUTPUT
+          echo "pod=$pod_name" >> $GITHUB_OUTPUT
+          
+          # Load WIP limits from stage-gates.yaml
+          per_pod_scaffold=$(yq eval '.configuration.wip_limits.per_pod.scaffold' stage-gates.yaml)
+          per_pod_total=$(yq eval '.configuration.wip_limits.per_pod.total' stage-gates.yaml)
+          per_person_owned=$(yq eval '.configuration.wip_limits.per_person.owned' stage-gates.yaml)
+          per_person_involved=$(yq eval '.configuration.wip_limits.per_person.involved' stage-gates.yaml)
+          portfolio_total=$(yq eval '.configuration.wip_limits.portfolio.total_active' stage-gates.yaml)
+          
+          # Query current WIP counts from GitHub and CLOS API
+          case "$check_type" in
+            "pod")
+              # Count active PRs for this pod
+              current_scaffold=$(gh pr list --state open --label "pod/$pod_name" --label "stage/scaffold" --json number | jq length)
+              current_total=$(gh pr list --state open --label "pod/$pod_name" --json number | jq length)
+              
+              if [[ "$current_scaffold" -gt "$per_pod_scaffold" ]] || [[ "$current_total" -gt "$per_pod_total" ]]; then
+                status="EXCEEDED"
+                limit="scaffold:$per_pod_scaffold,total:$per_pod_total"
+                current="scaffold:$current_scaffold,total:$current_total"
+              else
+                status="OK"
+                limit="scaffold:$per_pod_scaffold,total:$per_pod_total"
+                current="scaffold:$current_scaffold,total:$current_total"
+              fi
+              ;;
+              
+            "person")
+              # Count PRs owned by this person
+              owned_prs=$(gh pr list --state open --author "$owner" --json number | jq length)
+              
+              # Count PRs where person is involved (author, assignee, or reviewer)
+              involved_prs=$(gh search prs --state=open --involves="$owner" --json number | jq length)
+              
+              if [[ "$owned_prs" -gt "$per_person_owned" ]] || [[ "$involved_prs" -gt "$per_person_involved" ]]; then
+                status="EXCEEDED"
+                limit="owned:$per_person_owned,involved:$per_person_involved"
+                current="owned:$owned_prs,involved:$involved_prs"
+              else
+                status="OK"
+                limit="owned:$per_person_owned,involved:$per_person_involved"
+                current="owned:$owned_prs,involved:$involved_prs"
+              fi
+              ;;
+              
+            "portfolio")
+              # Count all active work items across the portfolio
+              total_prs=$(gh pr list --state open --repo "${{ github.repository }}" --json number | jq length)
+              total_issues=$(gh issue list --state open --repo "${{ github.repository }}" --json number | jq length)
+              total_active=$((total_prs + total_issues))
+              
+              if [[ "$total_active" -gt "$portfolio_total" ]]; then
+                status="EXCEEDED"
+                limit="$portfolio_total"
+                current="$total_active"
+              else
+                status="OK"
+                limit="$portfolio_total"
+                current="$total_active"
+              fi
+              ;;
+          esac
+          
+          echo "status=$status" >> $GITHUB_OUTPUT
+          echo "current=$current" >> $GITHUB_OUTPUT
+          echo "limit=$limit" >> $GITHUB_OUTPUT
+          
+          # If limits exceeded, identify violators
+          if [[ "$status" == "EXCEEDED" ]]; then
+            case "$check_type" in
+              "pod")
+                violators=$(gh pr list --state open --label "pod/$pod_name" --json author,title,number | jq -r '.[] | "\(.author.login): PR #\(.number) - \(.title)"' | head -5)
+                ;;
+              "person")
+                violators=$(gh pr list --state open --author "$owner" --json title,number | jq -r '.[] | "PR #\(.number) - \(.title)"' | head -5)
+                ;;
+              "portfolio")
+                violators=$(gh pr list --state open --json author,title,number | jq -r '.[] | "\(.author.login): PR #\(.number)"' | head -10)
+                ;;
+            esac
+            echo "violators<<EOF" >> $GITHUB_OUTPUT
+            echo "$violators" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          fi
+          
+          # Update CLOS API with current metrics
+          curl -s -X POST "$CLOS_API_BASE/wip/update" \
+            -H "Authorization: Bearer ${{ secrets.CLOS_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"check_type\": \"$check_type\",
+              \"entity\": \"$([[ '$check_type' == 'pod' ]] && echo '$pod_name' || echo '$owner')\",
+              \"current_wip\": \"$current\",
+              \"limit\": \"$limit\",
+              \"status\": \"$status\",
+              \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"
+            }" || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  enforce-limits:
+    runs-on: ubuntu-latest
+    needs: check-wip-limits
+    if: needs.check-wip-limits.outputs.wip_status == 'EXCEEDED'
+    steps:
+      - name: Block or Queue Work
+        run: |
+          status="${{ needs.check-wip-limits.outputs.wip_status }}"
+          
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            pr_number="${{ github.event.pull_request.number }}"
+            
+            # Add blocking label and comment
+            gh pr edit $pr_number --add-label "blocked/wip-limit-exceeded"
+            
+            gh pr comment $pr_number --body "## ⛔ WIP Limit Exceeded
+            
+This PR is currently blocked because WIP limits have been exceeded.
+
+**Current WIP:** ${{ needs.check-wip-limits.outputs.current }}
+**Limit:** ${{ needs.check-wip-limits.outputs.limit }}
+
+### Active Work Items:
+\`\`\`
+${{ needs.check-wip-limits.outputs.violators }}
+\`\`\`
+
+Please complete or close existing work items before proceeding with new work.
+
+Managed by CLOS v2.0 - Contact the Integrator Pod if you need assistance."
+            
+            # Convert to draft if it isn't already
+            gh pr ready $pr_number --undo || true
+            
+            echo "❌ PR #$pr_number blocked due to WIP limit violation" >> $GITHUB_STEP_SUMMARY
+            
+          elif [[ "${{ github.event_name }}" == "issues" ]]; then
+            issue_number="${{ github.event.issue.number }}"
+            
+            # Add blocking label and comment
+            gh issue edit $issue_number --add-label "blocked/wip-limit-exceeded"
+            
+            gh issue comment $issue_number --body "## ⛔ WIP Limit Exceeded
+            
+This issue is currently queued because WIP limits have been exceeded.
+
+**Current WIP:** ${{ needs.check-wip-limits.outputs.current }}
+**Limit:** ${{ needs.check-wip-limits.outputs.limit }}
+
+This issue will be automatically unblocked when WIP levels drop below limits.
+
+Managed by CLOS v2.0"
+            
+            echo "❌ Issue #$issue_number queued due to WIP limit violation" >> $GITHUB_STEP_SUMMARY
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  send-notifications:
+    runs-on: ubuntu-latest
+    needs: check-wip-limits
+    if: always() && needs.check-wip-limits.outputs.wip_status == 'EXCEEDED'
+    steps:
+      - name: Notify Slack
+        if: env.SLACK_WEBHOOK_URL
+        run: |
+          status="${{ needs.check-wip-limits.outputs.wip_status }}"
+          current="${{ needs.check-wip-limits.outputs.current }}"
+          limit="${{ needs.check-wip-limits.outputs.limit }}"
+          pod="${{ needs.check-wip-limits.outputs.pod_name }}"
+          owner="${{ needs.check-wip-limits.outputs.owner }}"
+          
+          # Determine Slack channel based on severity
+          if [[ "$status" == "EXCEEDED" ]]; then
+            channel="#unblock-and-commit"
+            color="danger"
+            title="🚨 WIP Limit Exceeded"
+          else
+            channel="#engineering"
+            color="warning"
+            title="⚠️ Approaching WIP Limit"
+          fi
+          
+          curl -X POST "$SLACK_WEBHOOK_URL" \
+            -H 'Content-type: application/json' \
+            -d "{
+              \"channel\": \"$channel\",
+              \"attachments\": [{
+                \"color\": \"$color\",
+                \"title\": \"$title\",
+                \"text\": \"WIP limits have been exceeded and work has been blocked.\",
+                \"fields\": [
+                  {\"title\": \"Pod\", \"value\": \"$pod\", \"short\": true},
+                  {\"title\": \"Owner\", \"value\": \"$owner\", \"short\": true},
+                  {\"title\": \"Current WIP\", \"value\": \"$current\", \"short\": true},
+                  {\"title\": \"Limit\", \"value\": \"$limit\", \"short\": true},
+                  {\"title\": \"Action Required\", \"value\": \"Complete or close existing work items\", \"short\": false}
+                ],
+                \"footer\": \"CLOS v2.0 WIP Enforcement\"
+              }]
+            }" || true
+
+  update-dashboard:
+    runs-on: ubuntu-latest
+    needs: check-wip-limits
+    if: always()
+    steps:
+      - name: Update CLOS Dashboard
+        run: |
+          # Send WIP metrics to dashboard
+          curl -s -X POST "$CLOS_API_BASE/metrics/wip" \
+            -H "Authorization: Bearer ${{ secrets.CLOS_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
+              \"repository\": \"${{ github.repository }}\",
+              \"pod\": \"${{ needs.check-wip-limits.outputs.pod_name }}\",
+              \"owner\": \"${{ needs.check-wip-limits.outputs.owner }}\",
+              \"wip_status\": \"${{ needs.check-wip-limits.outputs.wip_status }}\",
+              \"current_wip\": \"${{ needs.check-wip-limits.outputs.current }}\",
+              \"limit\": \"${{ needs.check-wip-limits.outputs.limit }}\",
+              \"event_type\": \"${{ github.event_name }}\",
+              \"event_action\": \"${{ github.event.action }}\"
+            }" || true
+          
+          echo "📊 Dashboard updated with WIP metrics" >> $GITHUB_STEP_SUMMARY
+
+  schedule-cleanup:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Cleanup Stale Work
+        run: |
+          # Find PRs that have been blocked for > 7 days
+          cutoff_date=$(date -d '7 days ago' +%Y-%m-%d)
+          
+          stale_prs=$(gh pr list --state open --label "blocked/wip-limit-exceeded" --json number,updatedAt | \
+            jq -r --arg cutoff "$cutoff_date" '.[] | select(.updatedAt < $cutoff) | .number')
+          
+          for pr_number in $stale_prs; do
+            echo "Found stale blocked PR: #$pr_number"
+            
+            # Comment and close if no recent activity
+            gh pr comment $pr_number --body "## 🧹 Automatic Cleanup
+
+This PR has been blocked by WIP limits for over 7 days with no activity.
+
+**Options:**
+1. Complete existing work items and reopen this PR
+2. Close other PRs to free up WIP capacity
+3. Contact the Integrator Pod for escalation
+
+This PR will be closed automatically to maintain system health.
+
+Managed by CLOS v2.0"
+            
+            # Close the PR
+            gh pr close $pr_number --comment "Automatically closed due to extended WIP limit violation"
+            
+            echo "🧹 Closed stale PR #$pr_number" >> $GITHUB_STEP_SUMMARY
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

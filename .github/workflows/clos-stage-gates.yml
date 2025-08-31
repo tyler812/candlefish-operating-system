@@ -1,0 +1,550 @@
+name: CLOS Stage Gates Enforcement
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  pull_request_review:
+    types: [submitted]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to validate'
+        required: true
+        type: number
+      force_gate:
+        description: 'Force specific gate (spark|seed|scaffold|ship|scale)'
+        required: false
+        type: string
+
+env:
+  CLOS_API_BASE: ${{ secrets.CLOS_API_BASE_URL || 'https://api.candlefish.ai' }}
+  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+  
+jobs:
+  detect-stage:
+    runs-on: ubuntu-latest
+    outputs:
+      current_stage: ${{ steps.stage.outputs.stage }}
+      project_id: ${{ steps.stage.outputs.project_id }}
+      pod_name: ${{ steps.stage.outputs.pod }}
+      owner: ${{ steps.stage.outputs.owner }}
+      stage_config: ${{ steps.stage.outputs.config }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          
+      - name: Detect Current Stage
+        id: stage
+        run: |
+          # Extract stage from PR labels, issue titles, or branch names
+          pr_number="${{ github.event.pull_request.number || inputs.pr_number }}"
+          
+          if [[ -n "${{ inputs.force_gate }}" ]]; then
+            echo "stage=${{ inputs.force_gate }}" >> $GITHUB_OUTPUT
+            echo "Forced stage: ${{ inputs.force_gate }}"
+          else
+            # Check PR labels for stage indicators
+            stage=$(gh pr view $pr_number --json labels --jq '.labels[] | select(.name | startswith("stage/")) | .name' | head -1 | cut -d'/' -f2)
+            
+            if [[ -z "$stage" ]]; then
+              # Check branch name patterns
+              branch_name="${{ github.head_ref || github.ref_name }}"
+              case "$branch_name" in
+                spark/*|idea/*) stage="spark" ;;
+                seed/*|spike/*) stage="seed" ;;
+                scaffold/*|feature/*|build/*) stage="scaffold" ;;
+                ship/*|release/*|deploy/*) stage="ship" ;;
+                scale/*|optimize/*) stage="scale" ;;
+                *) stage="spark" ;; # Default to spark
+              esac
+            fi
+            
+            echo "stage=$stage" >> $GITHUB_OUTPUT
+            echo "Detected stage: $stage"
+          fi
+          
+          # Extract project metadata
+          project_id=$(echo "${{ github.repository }}" | cut -d'/' -f2)
+          pod_name=$(gh pr view $pr_number --json labels --jq '.labels[] | select(.name | startswith("pod/")) | .name' | head -1 | cut -d'/' -f2 || echo "unknown")
+          owner=$(gh pr view $pr_number --json author --jq '.author.login')
+          
+          echo "project_id=$project_id" >> $GITHUB_OUTPUT
+          echo "pod=$pod_name" >> $GITHUB_OUTPUT
+          echo "owner=$owner" >> $GITHUB_OUTPUT
+          
+          # Load stage configuration
+          config=$(yq eval ".gates.$stage" stage-gates.yaml -o json)
+          echo "config=$config" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  validate-wip-limits:
+    runs-on: ubuntu-latest
+    needs: detect-stage
+    outputs:
+      wip_check: ${{ steps.wip.outputs.result }}
+      current_wip: ${{ steps.wip.outputs.current }}
+      limit: ${{ steps.wip.outputs.limit }}
+    steps:
+      - name: Check WIP Limits
+        id: wip
+        run: |
+          # Query CLOS API for current WIP counts
+          response=$(curl -s -H "Authorization: Bearer ${{ secrets.CLOS_API_TOKEN }}" \
+            "$CLOS_API_BASE/wip/check" \
+            -d "pod=${{ needs.detect-stage.outputs.pod_name }}" \
+            -d "stage=${{ needs.detect-stage.outputs.current_stage }}" \
+            -d "owner=${{ needs.detect-stage.outputs.owner }}")
+          
+          current_wip=$(echo $response | jq -r '.current_wip // 0')
+          limit=$(echo $response | jq -r '.limit // 999')
+          can_proceed=$(echo $response | jq -r '.can_proceed // true')
+          
+          echo "current=$current_wip" >> $GITHUB_OUTPUT
+          echo "limit=$limit" >> $GITHUB_OUTPUT
+          echo "result=$can_proceed" >> $GITHUB_OUTPUT
+          
+          if [[ "$can_proceed" == "false" ]]; then
+            echo "❌ WIP limit exceeded: $current_wip/$limit" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          else
+            echo "✅ WIP limit OK: $current_wip/$limit" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  validate-entry-criteria:
+    runs-on: ubuntu-latest
+    needs: [detect-stage, validate-wip-limits]
+    outputs:
+      entry_valid: ${{ steps.entry.outputs.valid }}
+      missing_criteria: ${{ steps.entry.outputs.missing }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          
+      - name: Install Dependencies
+        run: |
+          npm install -g yq js-yaml axios
+          
+      - name: Validate Entry Criteria
+        id: entry
+        run: |
+          stage="${{ needs.detect-stage.outputs.current_stage }}"
+          pr_number="${{ github.event.pull_request.number || inputs.pr_number }}"
+          
+          # Extract entry criteria from stage-gates.yaml
+          criteria=$(yq eval ".gates.$stage.entry_criteria" stage-gates.yaml -o json)
+          echo "Validating entry criteria for stage: $stage"
+          
+          missing_criteria=()
+          all_valid=true
+          
+          # Check each criterion
+          while IFS= read -r criterion; do
+            key=$(echo "$criterion" | jq -r 'keys[0]')
+            expected=$(echo "$criterion" | jq -r '.[keys[0]]')
+            
+            case "$key" in
+              "spark_gate_passed")
+                # Check if previous spark PR was merged
+                if ! gh pr list --state merged --label "stage/spark" --author "${{ needs.detect-stage.outputs.owner }}" | grep -q .; then
+                  missing_criteria+=("$key")
+                  all_valid=false
+                fi
+                ;;
+              "seed_gate_passed")
+                if ! gh pr list --state merged --label "stage/seed" --author "${{ needs.detect-stage.outputs.owner }}" | grep -q .; then
+                  missing_criteria+=("$key")
+                  all_valid=false
+                fi
+                ;;
+              "scaffold_gate_passed")
+                if ! gh pr list --state merged --label "stage/scaffold" --author "${{ needs.detect-stage.outputs.owner }}" | grep -q .; then
+                  missing_criteria+=("$key")
+                  all_valid=false
+                fi
+                ;;
+              "ship_gate_passed")
+                if ! gh pr list --state merged --label "stage/ship" --author "${{ needs.detect-stage.outputs.owner }}" | grep -q .; then
+                  missing_criteria+=("$key")
+                  all_valid=false
+                fi
+                ;;
+              "problem_statement_exists")
+                if ! grep -q "Problem Statement" README.md 2>/dev/null && ! grep -q "problem_statement" .github/ISSUE_TEMPLATE/*.md 2>/dev/null; then
+                  missing_criteria+=("$key")
+                  all_valid=false
+                fi
+                ;;
+              "owner_assigned")
+                if [[ -z "${{ needs.detect-stage.outputs.owner }}" ]]; then
+                  missing_criteria+=("$key")
+                  all_valid=false
+                fi
+                ;;
+              "pod_identified")
+                if [[ "${{ needs.detect-stage.outputs.pod_name }}" == "unknown" ]]; then
+                  missing_criteria+=("$key")
+                  all_valid=false
+                fi
+                ;;
+              "acceptance_criteria_defined")
+                if ! find . -name "*.md" -exec grep -l "Acceptance Criteria\|Definition of Done" {} \; | head -1 | grep -q .; then
+                  missing_criteria+=("$key")
+                  all_valid=false
+                fi
+                ;;
+              "minimum_remarkable_checklist")
+                if [[ ! -f "ship-checklist.md" ]]; then
+                  missing_criteria+=("$key")
+                  all_valid=false
+                fi
+                ;;
+            esac
+          done < <(echo "$criteria" | jq -c 'to_entries[]')
+          
+          echo "valid=$all_valid" >> $GITHUB_OUTPUT
+          echo "missing=$(IFS=,; echo "${missing_criteria[*]}")" >> $GITHUB_OUTPUT
+          
+          if [[ "$all_valid" == "true" ]]; then
+            echo "✅ All entry criteria met" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Missing entry criteria: ${missing_criteria[*]}" >> $GITHUB_STEP_SUMMARY
+            echo "## Missing Entry Criteria" >> $GITHUB_STEP_SUMMARY
+            for criterion in "${missing_criteria[@]}"; do
+              echo "- [ ] $criterion" >> $GITHUB_STEP_SUMMARY
+            done
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  validate-artifacts:
+    runs-on: ubuntu-latest
+    needs: [detect-stage, validate-entry-criteria]
+    outputs:
+      artifacts_valid: ${{ steps.artifacts.outputs.valid }}
+      missing_artifacts: ${{ steps.artifacts.outputs.missing }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Validate Required Artifacts
+        id: artifacts
+        run: |
+          stage="${{ needs.detect-stage.outputs.current_stage }}"
+          
+          # Extract required artifacts from stage-gates.yaml
+          artifacts=$(yq eval ".gates.$stage.required_artifacts" stage-gates.yaml -o json)
+          
+          missing_artifacts=()
+          all_valid=true
+          
+          # Check each artifact
+          while IFS= read -r artifact; do
+            type=$(echo "$artifact" | jq -r '.type')
+            location=$(echo "$artifact" | jq -r '.location')
+            
+            echo "Checking artifact: $type at $location"
+            
+            case "$type" in
+              "idea_ledger_entry")
+                # Check if idea ledger entry exists (mock check for demo)
+                if ! curl -s -f "$CLOS_API_BASE/ideas/check/${{ needs.detect-stage.outputs.project_id }}" > /dev/null; then
+                  missing_artifacts+=("$type")
+                  all_valid=false
+                fi
+                ;;
+              "technical_spike")
+                if [[ ! -d "spikes" ]] || [[ -z "$(find spikes -name "*.md" -o -name "*.py" -o -name "*.ts" -o -name "*.go" 2>/dev/null)" ]]; then
+                  missing_artifacts+=("$type")
+                  all_valid=false
+                fi
+                ;;
+              "decision_memo")
+                if [[ ! -d "decision-memos" ]] || [[ -z "$(find decision-memos -name "*.md" 2>/dev/null)" ]]; then
+                  missing_artifacts+=("$type")
+                  all_valid=false
+                fi
+                ;;
+              "core_implementation")
+                if [[ ! -d "src" ]] || [[ -z "$(find src -name "*.py" -o -name "*.ts" -o -name "*.go" -o -name "*.js" 2>/dev/null)" ]]; then
+                  missing_artifacts+=("$type")
+                  all_valid=false
+                fi
+                ;;
+              "test_suite")
+                if [[ ! -d "tests" ]] && [[ ! -d "test" ]] && [[ ! -d "__tests__" ]]; then
+                  missing_artifacts+=("$type")
+                  all_valid=false
+                fi
+                ;;
+              "minimum_remarkable_checklist")
+                if [[ ! -f "ship-checklist.md" ]]; then
+                  missing_artifacts+=("$type")
+                  all_valid=false
+                fi
+                ;;
+              "release_notes")
+                if [[ ! -f "CHANGELOG.md" ]]; then
+                  missing_artifacts+=("$type")
+                  all_valid=false
+                fi
+                ;;
+            esac
+          done < <(echo "$artifacts" | jq -c '.[]')
+          
+          echo "valid=$all_valid" >> $GITHUB_OUTPUT
+          echo "missing=$(IFS=,; echo "${missing_artifacts[*]}")" >> $GITHUB_OUTPUT
+          
+          if [[ "$all_valid" == "true" ]]; then
+            echo "✅ All required artifacts present" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Missing artifacts: ${missing_artifacts[*]}" >> $GITHUB_STEP_SUMMARY
+            echo "## Missing Required Artifacts" >> $GITHUB_STEP_SUMMARY
+            for artifact in "${missing_artifacts[@]}"; do
+              echo "- [ ] $artifact" >> $GITHUB_STEP_SUMMARY
+            done
+          fi
+
+  run-promotion-tests:
+    runs-on: ubuntu-latest
+    needs: [detect-stage, validate-artifacts]
+    if: needs.validate-artifacts.outputs.artifacts_valid == 'true'
+    outputs:
+      tests_passed: ${{ steps.tests.outputs.passed }}
+      test_results: ${{ steps.tests.outputs.results }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Test Environment
+        run: |
+          # Setup based on detected language/framework
+          if [[ -f "package.json" ]]; then
+            npm install
+          elif [[ -f "requirements.txt" ]]; then
+            pip install -r requirements.txt
+          elif [[ -f "go.mod" ]]; then
+            go mod download
+          fi
+          
+      - name: Run Promotion Tests
+        id: tests
+        run: |
+          stage="${{ needs.detect-stage.outputs.current_stage }}"
+          
+          # Extract promotion test script from stage-gates.yaml
+          test_script=$(yq eval ".gates.$stage.promotion_test.script" stage-gates.yaml -r)
+          timeout=$(yq eval ".gates.$stage.promotion_test.timeout // 300" stage-gates.yaml -r)
+          
+          if [[ "$test_script" != "null" && -f "$test_script" ]]; then
+            echo "Running promotion test: $test_script"
+            chmod +x "$test_script"
+            
+            # Run with timeout
+            if timeout "$timeout" "$test_script"; then
+              echo "passed=true" >> $GITHUB_OUTPUT
+              echo "results=All promotion tests passed" >> $GITHUB_OUTPUT
+              echo "✅ Promotion tests passed" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "passed=false" >> $GITHUB_OUTPUT
+              echo "results=Promotion tests failed or timed out" >> $GITHUB_OUTPUT
+              echo "❌ Promotion tests failed" >> $GITHUB_STEP_SUMMARY
+              exit 1
+            fi
+          else
+            # Default tests based on stage
+            case "$stage" in
+              "spark")
+                echo "passed=true" >> $GITHUB_OUTPUT
+                echo "results=Spark validation passed" >> $GITHUB_OUTPUT
+                ;;
+              "seed")
+                if [[ -d "spikes" ]] && find spikes -name "*.md" | head -1 | grep -q .; then
+                  echo "passed=true" >> $GITHUB_OUTPUT
+                  echo "results=Seed artifacts validated" >> $GITHUB_OUTPUT
+                else
+                  echo "passed=false" >> $GITHUB_OUTPUT
+                  echo "results=Missing spike documentation" >> $GITHUB_OUTPUT
+                  exit 1
+                fi
+                ;;
+              "scaffold")
+                # Run tests if they exist
+                if [[ -d "tests" ]] || [[ -d "test" ]] || [[ -d "__tests__" ]]; then
+                  if command -v npm &> /dev/null && [[ -f "package.json" ]]; then
+                    npm test
+                  elif command -v pytest &> /dev/null; then
+                    pytest
+                  elif command -v go &> /dev/null && [[ -f "go.mod" ]]; then
+                    go test ./...
+                  fi
+                fi
+                echo "passed=true" >> $GITHUB_OUTPUT
+                echo "results=Scaffold tests completed" >> $GITHUB_OUTPUT
+                ;;
+              "ship")
+                # Check minimum remarkable checklist
+                if [[ -f "ship-checklist.md" ]]; then
+                  incomplete=$(grep -c "- \[ \]" ship-checklist.md || echo 0)
+                  if [[ "$incomplete" -eq 0 ]]; then
+                    echo "passed=true" >> $GITHUB_OUTPUT
+                    echo "results=Ship checklist complete" >> $GITHUB_OUTPUT
+                  else
+                    echo "passed=false" >> $GITHUB_OUTPUT
+                    echo "results=Ship checklist has $incomplete incomplete items" >> $GITHUB_OUTPUT
+                    exit 1
+                  fi
+                else
+                  echo "passed=false" >> $GITHUB_OUTPUT
+                  echo "results=Missing ship checklist" >> $GITHUB_OUTPUT
+                  exit 1
+                fi
+                ;;
+              "scale")
+                echo "passed=true" >> $GITHUB_OUTPUT
+                echo "results=Scale validation passed" >> $GITHUB_OUTPUT
+                ;;
+            esac
+          fi
+
+  assign-reviewers:
+    runs-on: ubuntu-latest
+    needs: [detect-stage, run-promotion-tests]
+    if: needs.run-promotion-tests.outputs.tests_passed == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Auto-assign Reviewers
+        run: |
+          stage="${{ needs.detect-stage.outputs.current_stage }}"
+          pr_number="${{ github.event.pull_request.number || inputs.pr_number }}"
+          
+          # Extract reviewers from stage-gates.yaml
+          reviewers=$(yq eval ".gates.$stage.reviewers" stage-gates.yaml -o json)
+          
+          assigned_reviewers=()
+          
+          while IFS= read -r reviewer; do
+            role=$(echo "$reviewer" | jq -r '.role')
+            required=$(echo "$reviewer" | jq -r '.required // true')
+            
+            # Map roles to actual GitHub users
+            case "$role" in
+              "pod_lead")
+                case "${{ needs.detect-stage.outputs.pod_name }}" in
+                  "promoteros") assigned_reviewers+=("promoteros-lead") ;;
+                  "ratio") assigned_reviewers+=("ratio-lead") ;;
+                  "crown-trophy") assigned_reviewers+=("crown-trophy-lead") ;;
+                  *) assigned_reviewers+=("${{ needs.detect-stage.outputs.pod_name }}-lead") ;;
+                esac
+                ;;
+              "integrator_pod")
+                assigned_reviewers+=("integrator-team")
+                ;;
+              "technical_lead")
+                assigned_reviewers+=("tech-lead")
+                ;;
+              "patrick")
+                assigned_reviewers+=("patricksmith")
+                ;;
+              "portfolio_council")
+                assigned_reviewers+=("portfolio-council")
+                ;;
+            esac
+          done < <(echo "$reviewers" | jq -c '.[]')
+          
+          # Assign reviewers to PR
+          if [[ ${#assigned_reviewers[@]} -gt 0 ]]; then
+            reviewer_list=$(IFS=,; echo "${assigned_reviewers[*]}")
+            gh pr edit $pr_number --add-reviewer "$reviewer_list" || true
+            echo "✅ Assigned reviewers: $reviewer_list" >> $GITHUB_STEP_SUMMARY
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  gate-decision:
+    runs-on: ubuntu-latest
+    needs: [detect-stage, validate-wip-limits, validate-entry-criteria, validate-artifacts, run-promotion-tests]
+    steps:
+      - name: Stage Gate Decision
+        run: |
+          stage="${{ needs.detect-stage.outputs.current_stage }}"
+          pr_number="${{ github.event.pull_request.number || inputs.pr_number }}"
+          
+          wip_valid="${{ needs.validate-wip-limits.outputs.wip_check }}"
+          entry_valid="${{ needs.validate-entry-criteria.outputs.entry_valid }}"
+          artifacts_valid="${{ needs.validate-artifacts.outputs.artifacts_valid }}"
+          tests_passed="${{ needs.run-promotion-tests.outputs.tests_passed }}"
+          
+          # Determine gate status
+          if [[ "$wip_valid" == "true" && "$entry_valid" == "true" && "$artifacts_valid" == "true" && "$tests_passed" == "true" ]]; then
+            status="APPROVED"
+            gh pr edit $pr_number --add-label "gate/$stage-approved" --remove-label "gate/$stage-blocked" || true
+            
+            # Notify CLOS API of successful gate passage
+            curl -s -X POST "$CLOS_API_BASE/gates/promote" \
+              -H "Authorization: Bearer ${{ secrets.CLOS_API_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              -d "{
+                \"project_id\": \"${{ needs.detect-stage.outputs.project_id }}\",
+                \"stage\": \"$stage\",
+                \"pr_number\": $pr_number,
+                \"owner\": \"${{ needs.detect-stage.outputs.owner }}\",
+                \"pod\": \"${{ needs.detect-stage.outputs.pod_name }}\"
+              }" || true
+              
+            echo "## 🎉 Stage Gate APPROVED: $stage" >> $GITHUB_STEP_SUMMARY
+            echo "All criteria met. Ready for next stage!" >> $GITHUB_STEP_SUMMARY
+          else
+            status="BLOCKED"
+            gh pr edit $pr_number --add-label "gate/$stage-blocked" --remove-label "gate/$stage-approved" || true
+            
+            echo "## ❌ Stage Gate BLOCKED: $stage" >> $GITHUB_STEP_SUMMARY
+            echo "### Issues to resolve:" >> $GITHUB_STEP_SUMMARY
+            
+            if [[ "$wip_valid" == "false" ]]; then
+              echo "- [ ] WIP limits exceeded (${{ needs.validate-wip-limits.outputs.current }}/${{ needs.validate-wip-limits.outputs.limit }})" >> $GITHUB_STEP_SUMMARY
+            fi
+            
+            if [[ "$entry_valid" == "false" ]]; then
+              echo "- [ ] Missing entry criteria: ${{ needs.validate-entry-criteria.outputs.missing_criteria }}" >> $GITHUB_STEP_SUMMARY
+            fi
+            
+            if [[ "$artifacts_valid" == "false" ]]; then
+              echo "- [ ] Missing artifacts: ${{ needs.validate-artifacts.outputs.missing_artifacts }}" >> $GITHUB_STEP_SUMMARY
+            fi
+            
+            if [[ "$tests_passed" == "false" ]]; then
+              echo "- [ ] Promotion tests failed: ${{ needs.run-promotion-tests.outputs.test_results }}" >> $GITHUB_STEP_SUMMARY
+            fi
+            
+            exit 1
+          fi
+          
+          # Send Slack notification
+          if [[ -n "$SLACK_WEBHOOK_URL" ]]; then
+            slack_color=$([[ "$status" == "APPROVED" ]] && echo "good" || echo "danger")
+            slack_message="Stage Gate *$stage* for PR #$pr_number: *$status*"
+            
+            curl -X POST "$SLACK_WEBHOOK_URL" \
+              -H 'Content-type: application/json' \
+              -d "{
+                \"attachments\": [{
+                  \"color\": \"$slack_color\",
+                  \"title\": \"CLOS Stage Gate: $stage\",
+                  \"text\": \"$slack_message\",
+                  \"fields\": [
+                    {\"title\": \"Project\", \"value\": \"${{ needs.detect-stage.outputs.project_id }}\", \"short\": true},
+                    {\"title\": \"Owner\", \"value\": \"${{ needs.detect-stage.outputs.owner }}\", \"short\": true},
+                    {\"title\": \"Pod\", \"value\": \"${{ needs.detect-stage.outputs.pod_name }}\", \"short\": true},
+                    {\"title\": \"PR\", \"value\": \"<${{ github.event.pull_request.html_url || github.server_url }}/${{ github.repository }}/pull/$pr_number|#$pr_number>\", \"short\": true}
+                  ]
+                }]
+              }" || true
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,408 @@
+name: CLOS Demo Friday Coordination
+on:
+  schedule:
+    # Run every Thursday at 2 PM PST (22:00 UTC) to collect demo signups
+    - cron: '0 22 * * THU'
+    # Run every Friday at 10 AM PST (18:00 UTC) to send reminders  
+    - cron: '0 18 * * FRI'
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: true
+        default: 'collect-demos'
+        type: choice
+        options:
+        - collect-demos
+        - send-reminders
+        - generate-schedule
+        - post-recordings
+      demo_date:
+        description: 'Demo date (YYYY-MM-DD)'
+        required: false
+        type: string
+
+env:
+  CLOS_API_BASE: ${{ secrets.CLOS_API_BASE_URL || 'https://api.candlefish.ai' }}
+  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+  ZOOM_API_KEY: ${{ secrets.ZOOM_API_KEY }}
+  LOOM_API_KEY: ${{ secrets.LOOM_API_KEY }}
+
+jobs:
+  determine-action:
+    runs-on: ubuntu-latest
+    outputs:
+      action: ${{ steps.action.outputs.action }}
+      demo_date: ${{ steps.action.outputs.demo_date }}
+      is_friday: ${{ steps.action.outputs.is_friday }}
+    steps:
+      - name: Determine Action
+        id: action
+        run: |
+          if [[ -n "${{ inputs.action }}" ]]; then
+            action="${{ inputs.action }}"
+          else
+            # Auto-determine based on schedule
+            day_of_week=$(date +%u)
+            if [[ "$day_of_week" == "4" ]]; then  # Thursday
+              action="collect-demos"
+            elif [[ "$day_of_week" == "5" ]]; then  # Friday
+              action="send-reminders"
+            else
+              action="collect-demos"  # Default
+            fi
+          fi
+          
+          if [[ -n "${{ inputs.demo_date }}" ]]; then
+            demo_date="${{ inputs.demo_date }}"
+          else
+            # Find next Friday
+            days_until_friday=$((5 - $(date +%u)))
+            if [[ "$days_until_friday" -le 0 ]]; then
+              days_until_friday=$((days_until_friday + 7))
+            fi
+            demo_date=$(date -d "+${days_until_friday} days" +%Y-%m-%d)
+          fi
+          
+          is_friday=$([[ "$(date +%u)" == "5" ]] && echo "true" || echo "false")
+          
+          echo "action=$action" >> $GITHUB_OUTPUT
+          echo "demo_date=$demo_date" >> $GITHUB_OUTPUT
+          echo "is_friday=$is_friday" >> $GITHUB_OUTPUT
+          
+          echo "Action: $action" >> $GITHUB_STEP_SUMMARY
+          echo "Demo date: $demo_date" >> $GITHUB_STEP_SUMMARY
+
+  collect-demo-signups:
+    runs-on: ubuntu-latest
+    needs: determine-action
+    if: needs.determine-action.outputs.action == 'collect-demos'
+    outputs:
+      signups_collected: ${{ steps.collect.outputs.signups }}
+      demo_count: ${{ steps.collect.outputs.count }}
+      issue_number: ${{ steps.collect.outputs.issue_number }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Scan for Demo Candidates
+        id: candidates
+        run: |
+          demo_date="${{ needs.determine-action.outputs.demo_date }}"
+          
+          echo "## 🎬 Scanning for Demo Candidates - $demo_date" >> $GITHUB_STEP_SUMMARY
+          
+          # Find recently merged PRs that might have demos
+          merged_prs=$(gh pr list --state merged --limit 20 --json number,title,author,mergedAt,labels | \
+            jq -r '.[] | select(.mergedAt > (now - 7*24*3600 | strftime("%Y-%m-%dT%H:%M:%SZ"))) | 
+            "- PR #\(.number): \(.title) (@\(.author.login)) - " + (.labels[] | select(.name | startswith("stage/")) | .name // "unknown stage")'
+          )
+          
+          if [[ -n "$merged_prs" ]]; then
+            echo "### Recently Merged PRs (Potential Demos)" >> $GITHUB_STEP_SUMMARY
+            echo "$merged_prs" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Find PRs with demo recordings
+          demo_prs=$(gh pr list --state all --search "demo in:comments" --limit 10 --json number,title,author | \
+            jq -r '.[] | "- PR #\(.number): \(.title) (@\(.author.login))"'
+          )
+          
+          if [[ -n "$demo_prs" ]]; then
+            echo "### PRs with Demo Content" >> $GITHUB_STEP_SUMMARY
+            echo "$demo_prs" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "candidates<<EOF" >> $GITHUB_OUTPUT
+          echo "$merged_prs" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Create Demo Signup Issue
+        id: collect
+        run: |
+          demo_date="${{ needs.determine-action.outputs.demo_date }}"
+          candidates="${{ steps.candidates.outputs.candidates }}"
+          
+          # Create demo signup issue
+          cat > /tmp/demo_signup.md << EOF
+# 🎬 Demo Friday Signups - $demo_date
+
+**When:** Friday at 3:00 PM PST
+**Where:** Zoom (link will be shared)
+**Duration:** 5 minutes per demo
+
+## How to Sign Up
+Comment below with your demo details:
+
+\`\`\`
+**Demo Title:** Brief, catchy title
+**Presenter:** @your-username  
+**Duration:** X minutes (max 5)
+**What you'll show:** Brief description
+**Audience:** Who should attend (everyone/technical/business)
+**Stage:** spark/seed/scaffold/ship/scale
+**Recording needed:** yes/no
+\`\`\`
+
+## Potential Demo Candidates
+Based on recent activity, these PRs might have something worth demoing:
+
+$candidates
+
+## Demo Guidelines
+- ✅ Show working software, not slides
+- ✅ Focus on user value and impact
+- ✅ Keep it under 5 minutes
+- ✅ Have a clear "wow" moment
+- ⚠️ No PowerPoint presentations
+- ⚠️ No code reviews or technical deep-dives
+
+## Current Signups
+<!-- Signups will be tracked here -->
+
+---
+*Auto-generated by CLOS v2.0 Demo Friday automation*
+EOF
+
+          # Create the issue
+          issue_url=$(gh issue create \
+            --title "Demo Friday Signups - $demo_date" \
+            --body-file /tmp/demo_signup.md \
+            --label "demo-friday,signups,CLOS-generated" \
+            --milestone "Demo Friday $(date -d "$demo_date" '+%B %Y')" 2>/dev/null || \
+            gh issue create \
+            --title "Demo Friday Signups - $demo_date" \
+            --body-file /tmp/demo_signup.md \
+            --label "demo-friday,signups,CLOS-generated")
+          
+          issue_number=$(echo "$issue_url" | grep -o '[0-9]\+$')
+          
+          echo "signups=0" >> $GITHUB_OUTPUT
+          echo "count=0" >> $GITHUB_OUTPUT
+          echo "issue_number=$issue_number" >> $GITHUB_OUTPUT
+          
+          echo "✅ Created demo signup issue: #$issue_number" >> $GITHUB_STEP_SUMMARY
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Notify Slack for Signups
+        if: env.SLACK_WEBHOOK_URL
+        run: |
+          demo_date="${{ needs.determine-action.outputs.demo_date }}"
+          issue_number="${{ steps.collect.outputs.issue_number }}"
+          issue_url="${{ github.server_url }}/${{ github.repository }}/issues/$issue_number"
+          
+          curl -X POST "$SLACK_WEBHOOK_URL" \
+            -H 'Content-type: application/json' \
+            -d "{
+              \"channel\": \"#demo-friday\",
+              \"text\": \"Demo Friday signup is open!\",
+              \"attachments\": [{
+                \"color\": \"good\",
+                \"title\": \"🎬 Demo Friday - $demo_date\",
+                \"title_link\": \"$issue_url\",
+                \"text\": \"Time to show off what you've been building!\",
+                \"fields\": [
+                  {\"title\": \"When\", \"value\": \"$demo_date at 3:00 PM PST\", \"short\": true},
+                  {\"title\": \"Where\", \"value\": \"Zoom (link TBD)\", \"short\": true},
+                  {\"title\": \"Action Required\", \"value\": \"Sign up in the GitHub issue\", \"short\": false}
+                ],
+                \"footer\": \"CLOS v2.0 Demo Automation\"
+              }]
+            }" || true
+
+  send-reminders:
+    runs-on: ubuntu-latest
+    needs: determine-action
+    if: needs.determine-action.outputs.action == 'send-reminders'
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Find Demo Signup Issue
+        id: find-issue
+        run: |
+          demo_date="${{ needs.determine-action.outputs.demo_date }}"
+          
+          # Find the demo signup issue for today
+          issue_number=$(gh issue list --label "demo-friday,signups" --state open --json number,title | \
+            jq -r --arg date "$demo_date" '.[] | select(.title | contains($date)) | .number' | head -1)
+          
+          if [[ -n "$issue_number" && "$issue_number" != "null" ]]; then
+            echo "issue_number=$issue_number" >> $GITHUB_OUTPUT
+            echo "found=true" >> $GITHUB_OUTPUT
+            echo "✅ Found demo issue: #$issue_number" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "found=false" >> $GITHUB_OUTPUT
+            echo "⚠️ No demo issue found for $demo_date" >> $GITHUB_STEP_SUMMARY
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Parse Demo Signups
+        id: parse
+        if: steps.find-issue.outputs.found == 'true'
+        run: |
+          issue_number="${{ steps.find-issue.outputs.issue_number }}"
+          
+          # Get issue comments to parse signups
+          signups=$(gh issue view $issue_number --json comments | \
+            jq -r '.comments[] | .body' | \
+            grep -E "^\*\*Demo Title:\*\*|^\*\*Presenter:\*\*" | \
+            sed 'N;s/\n/ /' | \
+            sed 's/\*\*Demo Title:\*\* //' | \
+            sed 's/\*\*Presenter:\*\* /- Presenter: /' || echo "")
+          
+          signup_count=$(echo "$signups" | wc -l | tr -d ' ')
+          
+          if [[ "$signup_count" -gt 0 ]]; then
+            echo "signups<<EOF" >> $GITHUB_OUTPUT
+            echo "$signups" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            echo "count=$signup_count" >> $GITHUB_OUTPUT
+          else
+            echo "signups=" >> $GITHUB_OUTPUT
+            echo "count=0" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "Found $signup_count demo signups" >> $GITHUB_STEP_SUMMARY
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Create Zoom Meeting
+        id: zoom
+        if: steps.parse.outputs.count > 0 && env.ZOOM_API_KEY
+        run: |
+          demo_date="${{ needs.determine-action.outputs.demo_date }}"
+          
+          # Create Zoom meeting via API (simplified - would need proper Zoom API integration)
+          meeting_response=$(curl -s -X POST "https://api.zoom.us/v2/users/me/meetings" \
+            -H "Authorization: Bearer $ZOOM_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"topic\": \"Demo Friday - $demo_date\",
+              \"type\": 2,
+              \"start_time\": \"${demo_date}T15:00:00\",
+              \"duration\": 60,
+              \"timezone\": \"America/Los_Angeles\",
+              \"settings\": {
+                \"host_video\": true,
+                \"participant_video\": false,
+                \"join_before_host\": true,
+                \"auto_recording\": \"cloud\"
+              }
+            }" || echo '{"join_url": "https://zoom.us/j/placeholder", "id": "12345"}')
+          
+          zoom_link=$(echo "$meeting_response" | jq -r '.join_url // "TBD"')
+          meeting_id=$(echo "$meeting_response" | jq -r '.id // "TBD"')
+          
+          echo "link=$zoom_link" >> $GITHUB_OUTPUT
+          echo "meeting_id=$meeting_id" >> $GITHUB_OUTPUT
+        
+      - name: Send Demo Day Reminders
+        if: env.SLACK_WEBHOOK_URL
+        run: |
+          demo_date="${{ needs.determine-action.outputs.demo_date }}"
+          signup_count="${{ steps.parse.outputs.count || 0 }}"
+          zoom_link="${{ steps.zoom.outputs.link || 'TBD' }}"
+          
+          if [[ "$signup_count" -gt 0 ]]; then
+            color="good"
+            message="🎉 $signup_count demos scheduled for today!"
+          else
+            color="warning" 
+            message="📢 No demos scheduled yet - there's still time to sign up!"
+          fi
+          
+          curl -X POST "$SLACK_WEBHOOK_URL" \
+            -H 'Content-type: application/json' \
+            -d "{
+              \"channel\": \"#demo-friday\",
+              \"text\": \"Demo Friday Reminder\",
+              \"attachments\": [{
+                \"color\": \"$color\",
+                \"title\": \"🎬 Demo Friday - TODAY at 3:00 PM PST\",
+                \"text\": \"$message\",
+                \"fields\": [
+                  {\"title\": \"Zoom Link\", \"value\": \"$zoom_link\", \"short\": false},
+                  {\"title\": \"Demos Scheduled\", \"value\": \"$signup_count\", \"short\": true},
+                  {\"title\": \"Time Remaining\", \"value\": \"Sign up by 2:30 PM\", \"short\": true}
+                ],
+                \"footer\": \"CLOS v2.0 Demo Automation\"
+              }]
+            }" || true
+
+  generate-schedule:
+    runs-on: ubuntu-latest
+    needs: determine-action
+    if: needs.determine-action.outputs.action == 'generate-schedule'
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Generate Demo Schedule
+        run: |
+          # This would generate a structured demo schedule
+          # For now, just create a summary
+          echo "📅 Demo schedule generation not yet implemented" >> $GITHUB_STEP_SUMMARY
+          
+          # Future implementation would:
+          # 1. Parse all demo signups
+          # 2. Assign time slots
+          # 3. Create calendar invites
+          # 4. Send schedule to participants
+
+  post-recordings:
+    runs-on: ubuntu-latest
+    needs: determine-action
+    if: needs.determine-action.outputs.action == 'post-recordings'
+    steps:
+      - name: Collect Demo Recordings
+        id: recordings
+        run: |
+          demo_date="${{ needs.determine-action.outputs.demo_date }}"
+          
+          # Placeholder for recording collection logic
+          # Would integrate with Zoom API, Loom, etc.
+          echo "📹 Recording collection not yet implemented" >> $GITHUB_STEP_SUMMARY
+          
+          # Future implementation would:
+          # 1. Download Zoom cloud recordings
+          # 2. Upload to knowledge base
+          # 3. Generate demo highlights
+          # 4. Share links with team
+
+      - name: Update Knowledge Base
+        run: |
+          # Send demo metadata to CLOS API
+          curl -s -X POST "$CLOS_API_BASE/demos/archive" \
+            -H "Authorization: Bearer ${{ secrets.CLOS_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"demo_date\": \"${{ needs.determine-action.outputs.demo_date }}\",
+              \"repository\": \"${{ github.repository }}\",
+              \"recordings\": [],
+              \"participants\": [],
+              \"demos_count\": 0,
+              \"status\": \"completed\"
+            }" || true
+
+  update-metrics:
+    runs-on: ubuntu-latest
+    needs: [determine-action, collect-demo-signups]
+    if: always()
+    steps:
+      - name: Update Demo Metrics
+        run: |
+          # Track demo participation metrics
+          curl -s -X POST "$CLOS_API_BASE/metrics/demo-friday" \
+            -H "Authorization: Bearer ${{ secrets.CLOS_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"demo_date\": \"${{ needs.determine-action.outputs.demo_date }}\",
+              \"action\": \"${{ needs.determine-action.outputs.action }}\",
+              \"signups_count\": ${{ needs.collect-demo-signups.outputs.demo_count || 0 }},
+              \"execution_time\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
+              \"repository\": \"${{ github.repository }}\"
+            }" || true
+          
+          echo "📊 Demo metrics updated" >> $GITHUB_STEP_SUMMARY

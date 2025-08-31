@@ -1,0 +1,401 @@
+"""
+CLOS Core API Schema
+Production-ready GraphQL schema for Candlefish Operating System
+"""
+
+scalar Date
+scalar JSON
+scalar Upload
+
+# Enums
+enum StageGate {
+  SPARK
+  SEED
+  SCAFFOLD
+  SHIP
+  SCALE
+  KILLED
+  PARKED
+}
+
+enum ImpactScore {
+  MINIMAL
+  LOW
+  MEDIUM
+  HIGH
+  TRANSFORMATIVE
+}
+
+enum EffortScore {
+  HOURS
+  DAYS
+  WEEKS
+  MONTHS
+  QUARTERS
+}
+
+enum StrategicFit {
+  MISALIGNED
+  TANGENTIAL
+  ALIGNED
+  CORE
+  CRITICAL
+}
+
+enum ConfidenceLevel {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum Pod {
+  CROWN_TROPHY
+  PAINTBOX
+  PROMOTER_OS
+  RATIO
+  PLATFORM
+  INTEGRATOR
+}
+
+enum ActivityType {
+  CREATED
+  UPDATED
+  GATE_CHANGED
+  REVIEWED
+  COMMENTED
+  ASSIGNED
+  BLOCKED
+  UNBLOCKED
+}
+
+enum NotificationType {
+  GATE_PROMOTION
+  GATE_REJECTION
+  WIP_LIMIT_EXCEEDED
+  REVIEW_DUE
+  AUTO_KILL_TRIGGERED
+  SLA_VIOLATION
+}
+
+# Core Types
+type User {
+  id: ID!
+  email: String!
+  name: String!
+  avatar: String
+  role: String!
+  pod: Pod
+  isActive: Boolean!
+  createdAt: Date!
+  updatedAt: Date!
+  
+  # Relations
+  ownedIdeas: [Idea!]!
+  assignedIdeas: [Idea!]!
+  activities: [Activity!]!
+  decisionMemos: [DecisionMemo!]!
+}
+
+type Idea {
+  id: ID!
+  title: String!
+  problemStatement: String!
+  hypothesis: String!
+  
+  # Scoring
+  impact: ImpactScore!
+  effort: EffortScore!
+  strategicFit: StrategicFit!
+  score: Float!
+  confidence: ConfidenceLevel!
+  
+  # Status
+  gate: StageGate!
+  owner: User
+  pod: Pod
+  
+  # Metadata
+  tags: [String!]!
+  customerRequest: Boolean!
+  revenueImpact: Float
+  
+  # Links
+  decisionMemoUrl: String
+  githubIssueUrl: String
+  demoUrl: String
+  
+  # Dates
+  nextReview: Date
+  killCriteria: String
+  createdAt: Date!
+  updatedAt: Date!
+  
+  # Relations
+  activities: [Activity!]!
+  reviews: [Review!]!
+  decisionMemo: DecisionMemo
+  wipLimits: [WipLimit!]!
+}
+
+type Activity {
+  id: ID!
+  type: ActivityType!
+  description: String!
+  metadata: JSON
+  
+  # Relations
+  idea: Idea!
+  user: User!
+  createdAt: Date!
+}
+
+type Review {
+  id: ID!
+  gate: StageGate!
+  status: String!
+  comments: String
+  artifactsValid: Boolean!
+  criteriaMetMap: JSON!
+  
+  # Relations
+  idea: Idea!
+  reviewer: User!
+  createdAt: Date!
+}
+
+type DecisionMemo {
+  id: ID!
+  title: String!
+  context: String!
+  threePaths: String!
+  recommendation: String!
+  reversibility: String!
+  successMetrics: String!
+  status: String!
+  votes: JSON
+  
+  # Relations
+  idea: Idea!
+  author: User!
+  createdAt: Date!
+  updatedAt: Date!
+}
+
+type WipLimit {
+  id: ID!
+  type: String! # per_pod, per_person, cross_pod, portfolio
+  gate: StageGate
+  pod: Pod
+  limit: Int!
+  current: Int!
+  isExceeded: Boolean!
+  
+  # Relations
+  ideas: [Idea!]!
+  lastUpdated: Date!
+}
+
+type Notification {
+  id: ID!
+  type: NotificationType!
+  title: String!
+  message: String!
+  isRead: Boolean!
+  metadata: JSON
+  
+  # Relations
+  user: User!
+  idea: Idea
+  createdAt: Date!
+}
+
+type PodHealth {
+  pod: Pod!
+  activeIdeas: Int!
+  wipLimits: [WipLimit!]!
+  velocity: Float!
+  qualityScore: Float!
+  slaViolations: Int!
+  lastUpdated: Date!
+}
+
+type StageGateMetrics {
+  gate: StageGate!
+  count: Int!
+  averageTimeInGate: Float!
+  promotionRate: Float!
+  killRate: Float!
+  slaViolations: Int!
+}
+
+type PortfolioMetrics {
+  totalIdeas: Int!
+  activeIdeas: Int!
+  gateDistribution: [StageGateMetrics!]!
+  podHealth: [PodHealth!]!
+  velocity: Float!
+  qualityTrend: [Float!]!
+  wipUtilization: Float!
+  lastUpdated: Date!
+}
+
+# Input Types
+input CreateIdeaInput {
+  title: String!
+  problemStatement: String!
+  hypothesis: String!
+  impact: ImpactScore!
+  effort: EffortScore!
+  strategicFit: StrategicFit!
+  confidence: ConfidenceLevel!
+  pod: Pod
+  tags: [String!]!
+  customerRequest: Boolean
+  revenueImpact: Float
+  killCriteria: String
+}
+
+input UpdateIdeaInput {
+  title: String
+  problemStatement: String
+  hypothesis: String
+  impact: ImpactScore
+  effort: EffortScore
+  strategicFit: StrategicFit
+  confidence: ConfidenceLevel
+  pod: Pod
+  tags: [String!]
+  customerRequest: Boolean
+  revenueImpact: Float
+  killCriteria: String
+  decisionMemoUrl: String
+  githubIssueUrl: String
+  demoUrl: String
+}
+
+input PromoteGateInput {
+  ideaId: ID!
+  targetGate: StageGate!
+  reviewComments: String
+  artifactsValidated: Boolean!
+  overrideChecks: Boolean
+}
+
+input CreateDecisionMemoInput {
+  ideaId: ID!
+  title: String!
+  context: String!
+  threePaths: String!
+  recommendation: String!
+  reversibility: String!
+  successMetrics: String!
+}
+
+input VoteDecisionMemoInput {
+  decisionMemoId: ID!
+  vote: String! # approve, reject, abstain
+  comments: String
+}
+
+input FilterInput {
+  gates: [StageGate!]
+  pods: [Pod!]
+  owners: [ID!]
+  tags: [String!]
+  customerRequest: Boolean
+  minScore: Float
+  maxScore: Float
+  reviewDue: Boolean
+}
+
+input SortInput {
+  field: String!
+  direction: String! # ASC, DESC
+}
+
+# Queries
+type Query {
+  # Idea Management
+  ideas(filter: FilterInput, sort: SortInput, limit: Int, offset: Int): [Idea!]!
+  idea(id: ID!): Idea
+  ideaByGithubUrl(url: String!): Idea
+  
+  # User Management
+  users(active: Boolean): [User!]!
+  user(id: ID!): User
+  me: User
+  
+  # Portfolio Management
+  portfolioMetrics: PortfolioMetrics!
+  podHealth(pod: Pod): [PodHealth!]!
+  wipLimits: [WipLimit!]!
+  
+  # Decision Memos
+  decisionMemos(ideaId: ID): [DecisionMemo!]!
+  decisionMemo(id: ID!): DecisionMemo
+  
+  # Activities & Notifications
+  activities(ideaId: ID, userId: ID, limit: Int): [Activity!]!
+  notifications(unreadOnly: Boolean): [Notification!]!
+  
+  # Analytics
+  stageGateMetrics: [StageGateMetrics!]!
+  velocityReport(pod: Pod, timeframe: String): JSON!
+  qualityReport(timeframe: String): JSON!
+  
+  # System Health
+  health: JSON!
+  version: String!
+}
+
+# Mutations
+type Mutation {
+  # Idea Management
+  createIdea(input: CreateIdeaInput!): Idea!
+  updateIdea(id: ID!, input: UpdateIdeaInput!): Idea!
+  deleteIdea(id: ID!): Boolean!
+  
+  # Stage Gate Operations
+  promoteGate(input: PromoteGateInput!): Idea!
+  rejectGate(ideaId: ID!, reason: String!): Idea!
+  killIdea(ideaId: ID!, reason: String!): Idea!
+  parkIdea(ideaId: ID!, reason: String!): Idea!
+  
+  # Assignment & Ownership
+  assignOwner(ideaId: ID!, userId: ID!): Idea!
+  assignPod(ideaId: ID!, pod: Pod!): Idea!
+  
+  # Decision Memos
+  createDecisionMemo(input: CreateDecisionMemoInput!): DecisionMemo!
+  voteDecisionMemo(input: VoteDecisionMemoInput!): DecisionMemo!
+  
+  # Reviews
+  submitReview(ideaId: ID!, gate: StageGate!, approved: Boolean!, comments: String): Review!
+  
+  # Notifications
+  markNotificationRead(id: ID!): Notification!
+  markAllNotificationsRead: Boolean!
+  
+  # Admin Operations
+  updateWipLimits(type: String!, limits: JSON!): [WipLimit!]!
+  recalculateMetrics: PortfolioMetrics!
+  triggerAutomation(type: String!, ideaId: ID): Boolean!
+}
+
+# Subscriptions
+type Subscription {
+  # Real-time Updates
+  ideaUpdated(ideaId: ID): Idea!
+  gatePromoted: Idea!
+  wipLimitExceeded: WipLimit!
+  
+  # Notifications
+  notificationReceived(userId: ID!): Notification!
+  
+  # Metrics
+  metricsUpdated: PortfolioMetrics!
+  podHealthUpdated(pod: Pod): PodHealth!
+  
+  # System Events
+  systemAlert: JSON!
+}

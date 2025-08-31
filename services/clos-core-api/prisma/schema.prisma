@@ -1,0 +1,349 @@
+// Prisma schema for CLOS Core API
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["fullTextSearch", "postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [pg_trgm, uuid_ossp]
+}
+
+// Enums
+enum StageGate {
+  SPARK
+  SEED
+  SCAFFOLD
+  SHIP
+  SCALE
+  KILLED
+  PARKED
+}
+
+enum ImpactScore {
+  MINIMAL
+  LOW
+  MEDIUM
+  HIGH
+  TRANSFORMATIVE
+}
+
+enum EffortScore {
+  HOURS
+  DAYS
+  WEEKS
+  MONTHS
+  QUARTERS
+}
+
+enum StrategicFit {
+  MISALIGNED
+  TANGENTIAL
+  ALIGNED
+  CORE
+  CRITICAL
+}
+
+enum ConfidenceLevel {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum Pod {
+  CROWN_TROPHY
+  PAINTBOX
+  PROMOTER_OS
+  RATIO
+  PLATFORM
+  INTEGRATOR
+}
+
+enum ActivityType {
+  CREATED
+  UPDATED
+  GATE_CHANGED
+  REVIEWED
+  COMMENTED
+  ASSIGNED
+  BLOCKED
+  UNBLOCKED
+}
+
+enum NotificationType {
+  GATE_PROMOTION
+  GATE_REJECTION
+  WIP_LIMIT_EXCEEDED
+  REVIEW_DUE
+  AUTO_KILL_TRIGGERED
+  SLA_VIOLATION
+}
+
+// Core Models
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String
+  avatar    String?
+  role      String
+  pod       Pod?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  ownedIdeas     Idea[]          @relation("IdeaOwner")
+  assignedIdeas  Idea[]          @relation("IdeaAssignee")
+  activities     Activity[]
+  reviews        Review[]
+  decisionMemos  DecisionMemo[]
+  notifications  Notification[]
+  votes          MemoVote[]
+
+  // Indexes
+  @@map("users")
+  @@index([email])
+  @@index([pod, isActive])
+}
+
+model Idea {
+  id               String          @id @default(cuid())
+  title            String
+  problemStatement String
+  hypothesis       String
+  
+  // Scoring
+  impact       ImpactScore
+  effort       EffortScore
+  strategicFit StrategicFit
+  score        Float           @default(0)
+  confidence   ConfidenceLevel
+  
+  // Status
+  gate    StageGate @default(SPARK)
+  ownerId String?
+  pod     Pod?
+  
+  // Metadata
+  tags            String[]
+  customerRequest Boolean  @default(false)
+  revenueImpact   Float?
+  
+  // Links
+  decisionMemoUrl String?
+  githubIssueUrl  String?
+  demoUrl         String?
+  
+  // Dates and lifecycle
+  nextReview    DateTime?
+  killCriteria  String?
+  killedAt      DateTime?
+  killedReason  String?
+  parkedAt      DateTime?
+  parkedReason  String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  
+  // Relations
+  owner         User?          @relation("IdeaOwner", fields: [ownerId], references: [id])
+  assignees     User[]         @relation("IdeaAssignee")
+  activities    Activity[]
+  reviews       Review[]
+  decisionMemo  DecisionMemo?
+  wipLimits     WipLimit[]     @relation("WipLimitIdeas")
+
+  // Indexes
+  @@map("ideas")
+  @@index([gate, pod])
+  @@index([score])
+  @@index([nextReview])
+  @@index([ownerId])
+  @@index([createdAt])
+  @@fulltext([title, problemStatement, hypothesis])
+}
+
+model Activity {
+  id          String       @id @default(cuid())
+  type        ActivityType
+  description String
+  metadata    Json?
+  createdAt   DateTime     @default(now())
+  
+  // Relations
+  ideaId String
+  userId String
+  idea   Idea   @relation(fields: [ideaId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id])
+
+  @@map("activities")
+  @@index([ideaId, createdAt])
+  @@index([userId, createdAt])
+  @@index([type, createdAt])
+}
+
+model Review {
+  id              String    @id @default(cuid())
+  gate            StageGate
+  status          String    @default("pending") // pending, approved, rejected
+  comments        String?
+  artifactsValid  Boolean   @default(false)
+  criteriaMetMap  Json      @default("{}")
+  createdAt       DateTime  @default(now())
+  
+  // Relations
+  ideaId     String
+  reviewerId String
+  idea       Idea   @relation(fields: [ideaId], references: [id], onDelete: Cascade)
+  reviewer   User   @relation(fields: [reviewerId], references: [id])
+
+  @@map("reviews")
+  @@index([ideaId, gate])
+  @@index([reviewerId])
+  @@index([status, createdAt])
+}
+
+model DecisionMemo {
+  id             String   @id @default(cuid())
+  title          String
+  context        String
+  threePaths     String
+  recommendation String
+  reversibility  String
+  successMetrics String
+  status         String   @default("draft") // draft, voting, approved, rejected
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  
+  // Relations
+  ideaId   String @unique
+  authorId String
+  idea     Idea   @relation(fields: [ideaId], references: [id], onDelete: Cascade)
+  author   User   @relation(fields: [authorId], references: [id])
+  votes    MemoVote[]
+
+  @@map("decision_memos")
+  @@index([status, createdAt])
+  @@index([authorId])
+}
+
+model MemoVote {
+  id        String   @id @default(cuid())
+  vote      String   // approve, reject, abstain
+  comments  String?
+  createdAt DateTime @default(now())
+  
+  // Relations
+  memoId String
+  userId String
+  memo   DecisionMemo @relation(fields: [memoId], references: [id], onDelete: Cascade)
+  user   User         @relation(fields: [userId], references: [id])
+
+  @@unique([memoId, userId])
+  @@map("memo_votes")
+}
+
+model WipLimit {
+  id          String     @id @default(cuid())
+  type        String     // per_pod, per_person, cross_pod, portfolio
+  gate        StageGate?
+  pod         Pod?
+  limit       Int
+  current     Int        @default(0)
+  isExceeded  Boolean    @default(false)
+  lastUpdated DateTime   @default(now())
+  
+  // Relations
+  ideas Ideas[] @relation("WipLimitIdeas")
+
+  @@map("wip_limits")
+  @@index([type, gate, pod])
+  @@index([isExceeded])
+}
+
+model Notification {
+  id        String           @id @default(cuid())
+  type      NotificationType
+  title     String
+  message   String
+  isRead    Boolean          @default(false)
+  metadata  Json?
+  createdAt DateTime         @default(now())
+  
+  // Relations
+  userId String
+  ideaId String?
+  user   User   @relation(fields: [userId], references: [id])
+  idea   Idea?  @relation(fields: [ideaId], references: [id])
+
+  @@map("notifications")
+  @@index([userId, isRead, createdAt])
+  @@index([type, createdAt])
+}
+
+model PodMetrics {
+  id              String   @id @default(cuid())
+  pod             Pod      @unique
+  activeIdeas     Int      @default(0)
+  velocity        Float    @default(0)
+  qualityScore    Float    @default(0)
+  slaViolations   Int      @default(0)
+  lastUpdated     DateTime @default(now())
+  
+  // Historical data
+  weeklyVelocity  Float[]  @default([])
+  weeklyQuality   Float[]  @default([])
+  monthlyMetrics  Json?
+
+  @@map("pod_metrics")
+}
+
+model SystemMetrics {
+  id                String   @id @default(cuid())
+  totalIdeas        Int      @default(0)
+  activeIdeas       Int      @default(0)
+  gateDistribution  Json     @default("{}")
+  velocity          Float    @default(0)
+  qualityTrend      Float[]  @default([])
+  wipUtilization    Float    @default(0)
+  lastUpdated       DateTime @default(now())
+  
+  // Singleton pattern - only one record
+  singleton Boolean @unique @default(true)
+
+  @@map("system_metrics")
+}
+
+// GitHub Integration
+model GitHubWebhook {
+  id          String   @id @default(cuid())
+  eventType   String
+  payload     Json
+  processed   Boolean  @default(false)
+  ideaId      String?
+  createdAt   DateTime @default(now())
+  processedAt DateTime?
+
+  @@map("github_webhooks")
+  @@index([processed, createdAt])
+  @@index([ideaId])
+}
+
+// Audit Log
+model AuditLog {
+  id          String   @id @default(cuid())
+  entity      String   // idea, user, wipLimit, etc
+  entityId    String
+  action      String   // create, update, delete, promote, etc
+  oldValues   Json?
+  newValues   Json?
+  userId      String?
+  ipAddress   String?
+  userAgent   String?
+  createdAt   DateTime @default(now())
+
+  @@map("audit_logs")
+  @@index([entity, entityId, createdAt])
+  @@index([userId, createdAt])
+  @@index([action, createdAt])
+}

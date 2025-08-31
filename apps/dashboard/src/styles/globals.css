@@ -1,0 +1,201 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&family=Fira+Code:wght@300..700&display=swap');
+
+@layer base {
+  html {
+    font-family: Inter, system-ui, sans-serif;
+  }
+  
+  body {
+    @apply bg-gray-50 text-gray-900 antialiased;
+  }
+  
+  /* Custom scrollbar */
+  ::-webkit-scrollbar {
+    @apply w-2 h-2;
+  }
+  
+  ::-webkit-scrollbar-track {
+    @apply bg-gray-100;
+  }
+  
+  ::-webkit-scrollbar-thumb {
+    @apply bg-gray-300 rounded-lg;
+  }
+  
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-gray-400;
+  }
+}
+
+@layer components {
+  /* Dashboard card styles */
+  .dashboard-card {
+    @apply bg-white rounded-lg border border-gray-200 shadow-sm hover:shadow-md transition-shadow duration-200;
+  }
+  
+  .dashboard-card-header {
+    @apply px-6 py-4 border-b border-gray-200;
+  }
+  
+  .dashboard-card-body {
+    @apply p-6;
+  }
+  
+  /* Metric card styles */
+  .metric-card {
+    @apply dashboard-card p-6 text-center;
+  }
+  
+  .metric-value {
+    @apply text-3xl font-bold text-gray-900;
+  }
+  
+  .metric-label {
+    @apply text-sm font-medium text-gray-500 mt-2;
+  }
+  
+  .metric-change {
+    @apply text-sm font-medium mt-1;
+  }
+  
+  .metric-change.positive {
+    @apply text-green-600;
+  }
+  
+  .metric-change.negative {
+    @apply text-red-600;
+  }
+  
+  .metric-change.neutral {
+    @apply text-gray-500;
+  }
+  
+  /* Button styles */
+  .btn {
+    @apply inline-flex items-center justify-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 transition-colors duration-200;
+  }
+  
+  .btn-primary {
+    @apply btn bg-brand-600 text-white hover:bg-brand-700 focus:ring-brand-500;
+  }
+  
+  .btn-secondary {
+    @apply btn bg-gray-100 text-gray-900 hover:bg-gray-200 focus:ring-gray-500;
+  }
+  
+  .btn-success {
+    @apply btn bg-green-600 text-white hover:bg-green-700 focus:ring-green-500;
+  }
+  
+  .btn-warning {
+    @apply btn bg-yellow-600 text-white hover:bg-yellow-700 focus:ring-yellow-500;
+  }
+  
+  .btn-danger {
+    @apply btn bg-red-600 text-white hover:bg-red-700 focus:ring-red-500;
+  }
+  
+  /* Navigation styles */
+  .nav-link {
+    @apply flex items-center px-3 py-2 text-sm font-medium rounded-md transition-colors duration-200;
+  }
+  
+  .nav-link.active {
+    @apply bg-brand-100 text-brand-900;
+  }
+  
+  .nav-link:not(.active) {
+    @apply text-gray-600 hover:text-gray-900 hover:bg-gray-100;
+  }
+  
+  /* Status indicators */
+  .status-dot {
+    @apply inline-block w-2 h-2 rounded-full;
+  }
+  
+  .status-healthy {
+    @apply bg-status-healthy;
+  }
+  
+  .status-warning {
+    @apply bg-status-warning;
+  }
+  
+  .status-critical {
+    @apply bg-status-critical;
+  }
+  
+  .status-offline {
+    @apply bg-status-offline;
+  }
+  
+  /* Stage gate colors */
+  .stage-ideation {
+    @apply text-stage-ideation bg-purple-50 border-purple-200;
+  }
+  
+  .stage-validation {
+    @apply text-stage-validation bg-cyan-50 border-cyan-200;
+  }
+  
+  .stage-development {
+    @apply text-stage-development bg-green-50 border-green-200;
+  }
+  
+  .stage-testing {
+    @apply text-stage-testing bg-yellow-50 border-yellow-200;
+  }
+  
+  .stage-deployment {
+    @apply text-stage-deployment bg-red-50 border-red-200;
+  }
+  
+  /* Loading animations */
+  .skeleton {
+    @apply animate-pulse bg-gray-200 rounded;
+  }
+  
+  .spinner {
+    @apply animate-spin inline-block w-4 h-4 border-2 border-current border-t-transparent rounded-full;
+  }
+  
+  /* Charts and data visualization */
+  .chart-container {
+    @apply w-full h-64 p-4;
+  }
+  
+  .chart-legend {
+    @apply flex items-center justify-center space-x-4 mt-4;
+  }
+  
+  .chart-legend-item {
+    @apply flex items-center space-x-2 text-sm;
+  }
+  
+  .chart-legend-color {
+    @apply w-3 h-3 rounded-full;
+  }
+}
+
+@layer utilities {
+  /* Custom utilities */
+  .text-shadow {
+    text-shadow: 0 2px 4px rgba(0,0,0,0.1);
+  }
+  
+  .glass {
+    backdrop-filter: blur(10px);
+    background-color: rgba(255, 255, 255, 0.8);
+  }
+  
+  .gradient-text {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+}

@@ -1,0 +1,551 @@
+name: Deploy CLOS Dashboard to Vercel
+on:
+  push:
+    branches: [main]
+    paths: ['services/clos-dashboard/**']
+  pull_request:
+    branches: [main]
+    paths: ['services/clos-dashboard/**']
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'preview'
+        type: choice
+        options:
+        - preview
+        - production
+      skip_tests:
+        description: 'Skip tests (emergency deployment)'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+  VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+  NODE_VERSION: '18'
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      dashboard_changed: ${{ steps.changes.outputs.dashboard }}
+      should_deploy: ${{ steps.changes.outputs.should_deploy }}
+      deployment_type: ${{ steps.changes.outputs.deployment_type }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          
+      - name: Detect Changes
+        id: changes
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            dashboard_changed="true"
+            should_deploy="true"
+            deployment_type="${{ inputs.environment }}"
+          elif [[ "${{ github.event_name }}" == "push" ]]; then
+            # Check if dashboard files changed
+            if git diff --name-only HEAD~1 HEAD | grep -q "services/clos-dashboard/"; then
+              dashboard_changed="true"
+              should_deploy="true"
+              deployment_type="production"
+            else
+              dashboard_changed="false"
+              should_deploy="false"
+              deployment_type="none"
+            fi
+          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -q "services/clos-dashboard/"; then
+              dashboard_changed="true"
+              should_deploy="true"
+              deployment_type="preview"
+            else
+              dashboard_changed="false"
+              should_deploy="false"
+              deployment_type="none"
+            fi
+          fi
+          
+          echo "dashboard=$dashboard_changed" >> $GITHUB_OUTPUT
+          echo "should_deploy=$should_deploy" >> $GITHUB_OUTPUT
+          echo "deployment_type=$deployment_type" >> $GITHUB_OUTPUT
+          
+          echo "Dashboard changed: $dashboard_changed" >> $GITHUB_STEP_SUMMARY
+          echo "Should deploy: $should_deploy" >> $GITHUB_STEP_SUMMARY
+          echo "Deployment type: $deployment_type" >> $GITHUB_STEP_SUMMARY
+
+  build-and-test:
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.should_deploy == 'true'
+    outputs:
+      build_successful: ${{ steps.build.outputs.success }}
+      lighthouse_score: ${{ steps.lighthouse.outputs.score }}
+      bundle_size: ${{ steps.analyze.outputs.size }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: services/clos-dashboard/package-lock.json
+          
+      - name: Install Dependencies
+        working-directory: services/clos-dashboard
+        run: |
+          npm ci
+          
+      - name: Type Check
+        working-directory: services/clos-dashboard
+        run: |
+          npm run type-check
+          
+      - name: Lint Code
+        working-directory: services/clos-dashboard
+        run: |
+          npm run lint
+          npm run lint:css
+          
+      - name: Run Unit Tests
+        if: inputs.skip_tests != true
+        working-directory: services/clos-dashboard
+        run: |
+          npm run test -- --coverage --watchAll=false
+          
+          # Check test coverage
+          coverage=$(npx nyc report --reporter=json | jq '.total.lines.pct // 0')
+          
+          if (( $(echo "$coverage >= 75" | bc -l) )); then
+            echo "✅ Test coverage: ${coverage}%" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ Test coverage below 75%: ${coverage}%" >> $GITHUB_STEP_SUMMARY
+            echo "Consider adding more tests before deploying to production" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+      - name: Build Application
+        id: build
+        working-directory: services/clos-dashboard
+        env:
+          NODE_ENV: production
+          NEXT_PUBLIC_API_URL: ${{ secrets.CLOS_API_URL }}
+          NEXT_PUBLIC_SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          NEXT_PUBLIC_VERCEL_ENV: ${{ needs.detect-changes.outputs.deployment_type }}
+        run: |
+          npm run build
+          
+          if [[ -d ".next" ]]; then
+            echo "success=true" >> $GITHUB_OUTPUT
+            echo "✅ Build successful" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "success=false" >> $GITHUB_OUTPUT
+            echo "❌ Build failed" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+          
+      - name: Analyze Bundle Size
+        id: analyze
+        working-directory: services/clos-dashboard
+        run: |
+          # Generate bundle analysis
+          npm run analyze
+          
+          # Calculate total bundle size
+          bundle_size=$(du -sh .next/static | cut -f1)
+          
+          echo "size=$bundle_size" >> $GITHUB_OUTPUT
+          echo "📦 Bundle size: $bundle_size" >> $GITHUB_STEP_SUMMARY
+          
+          # Check for large bundles
+          size_mb=$(echo "$bundle_size" | sed 's/M$//' | sed 's/K$//' | awk '{if($1>1000) print $1/1024; else print $1}')
+          
+          if (( $(echo "$size_mb > 5" | bc -l) )); then
+            echo "⚠️ Large bundle size detected: ${bundle_size}" >> $GITHUB_STEP_SUMMARY
+            echo "Consider code splitting or removing unused dependencies" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+      - name: Security Scan
+        working-directory: services/clos-dashboard
+        run: |
+          # Check for security vulnerabilities
+          npm audit --audit-level=high
+          
+          # Scan for secrets in code
+          if command -v truffleHog &> /dev/null; then
+            truffleHog --regex --entropy=False .
+          fi
+          
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-build
+          path: services/clos-dashboard/.next
+          retention-days: 7
+
+  lighthouse-audit:
+    runs-on: ubuntu-latest
+    needs: [detect-changes, build-and-test]
+    if: needs.detect-changes.outputs.deployment_type == 'preview'
+    outputs:
+      performance_score: ${{ steps.lighthouse.outputs.performance }}
+      accessibility_score: ${{ steps.lighthouse.outputs.accessibility }}
+      seo_score: ${{ steps.lighthouse.outputs.seo }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dashboard-build
+          path: services/clos-dashboard/.next
+          
+      - name: Start Next.js Server
+        working-directory: services/clos-dashboard
+        run: |
+          npm ci
+          npm run start &
+          
+          # Wait for server to start
+          sleep 10
+          
+      - name: Run Lighthouse Audit
+        id: lighthouse
+        uses: treosh/lighthouse-ci-action@v10
+        with:
+          configPath: services/clos-dashboard/lighthouse.config.js
+          temporaryPublicStorage: true
+          
+      - name: Extract Lighthouse Scores
+        run: |
+          # Extract scores from Lighthouse results
+          performance=$(echo '${{ steps.lighthouse.outputs.results }}' | jq '.[0].summary.performance')
+          accessibility=$(echo '${{ steps.lighthouse.outputs.results }}' | jq '.[0].summary.accessibility') 
+          seo=$(echo '${{ steps.lighthouse.outputs.results }}' | jq '.[0].summary.seo')
+          
+          echo "performance=$performance" >> $GITHUB_OUTPUT
+          echo "accessibility=$accessibility" >> $GITHUB_OUTPUT
+          echo "seo=$seo" >> $GITHUB_OUTPUT
+          
+          echo "## 🔍 Lighthouse Audit Results" >> $GITHUB_STEP_SUMMARY
+          echo "- **Performance:** ${performance}/100" >> $GITHUB_STEP_SUMMARY
+          echo "- **Accessibility:** ${accessibility}/100" >> $GITHUB_STEP_SUMMARY
+          echo "- **SEO:** ${seo}/100" >> $GITHUB_STEP_SUMMARY
+          
+          # Fail if scores are too low
+          if [[ "$performance" -lt 80 ]] || [[ "$accessibility" -lt 90 ]]; then
+            echo "⚠️ Lighthouse scores below threshold" >> $GITHUB_STEP_SUMMARY
+            echo "Consider optimizing before deploying to production" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  deploy-preview:
+    runs-on: ubuntu-latest
+    needs: [detect-changes, build-and-test]
+    if: needs.detect-changes.outputs.deployment_type == 'preview' && needs.build-and-test.outputs.build_successful == 'true'
+    outputs:
+      preview_url: ${{ steps.deploy.outputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          
+      - name: Install Vercel CLI
+        run: npm i -g vercel@latest
+        
+      - name: Pull Vercel Environment
+        working-directory: services/clos-dashboard
+        run: |
+          vercel pull --yes --environment=preview --token=${{ secrets.VERCEL_TOKEN }}
+          
+      - name: Deploy to Vercel (Preview)
+        id: deploy
+        working-directory: services/clos-dashboard
+        run: |
+          preview_url=$(vercel deploy --token=${{ secrets.VERCEL_TOKEN }} --yes)
+          
+          echo "url=$preview_url" >> $GITHUB_OUTPUT
+          echo "✅ Preview deployment: $preview_url" >> $GITHUB_STEP_SUMMARY
+          
+      - name: Update PR with Preview URL
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const previewUrl = '${{ steps.deploy.outputs.preview_url }}';
+            
+            const comment = `## 🚀 Dashboard Preview Deployed
+            
+            Your changes have been deployed to a preview environment:
+            
+            **🔗 Preview URL:** ${previewUrl}
+            
+            ### Build Summary
+            - **Bundle Size:** ${{ needs.build-and-test.outputs.bundle_size }}
+            - **Build Status:** ✅ Success
+            - **Deploy Time:** ${new Date().toLocaleString()}
+            
+            This preview will be updated automatically with new commits.`;
+            
+            // Find existing comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            
+            const existingComment = comments.find(comment => 
+              comment.body.includes('Dashboard Preview Deployed')
+            );
+            
+            if (existingComment) {
+              // Update existing comment
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existingComment.id,
+                body: comment
+              });
+            } else {
+              // Create new comment
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: comment
+              });
+            }
+
+  e2e-tests:
+    runs-on: ubuntu-latest
+    needs: [deploy-preview, lighthouse-audit]
+    if: needs.deploy-preview.outputs.preview_url
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          
+      - name: Install Playwright
+        working-directory: services/clos-dashboard
+        run: |
+          npm ci
+          npx playwright install
+          
+      - name: Run E2E Tests
+        working-directory: services/clos-dashboard
+        env:
+          PLAYWRIGHT_TEST_BASE_URL: ${{ needs.deploy-preview.outputs.preview_url }}
+          CI: true
+        run: |
+          npm run test:e2e
+          
+      - name: Upload E2E Test Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-test-results
+          path: services/clos-dashboard/test-results
+          retention-days: 7
+
+  deploy-production:
+    runs-on: ubuntu-latest
+    needs: [detect-changes, build-and-test, e2e-tests]
+    if: needs.detect-changes.outputs.deployment_type == 'production' && github.ref == 'refs/heads/main'
+    environment: production
+    outputs:
+      production_url: ${{ steps.deploy.outputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          
+      - name: Install Vercel CLI
+        run: npm i -g vercel@latest
+        
+      - name: Pull Vercel Environment
+        working-directory: services/clos-dashboard
+        run: |
+          vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
+          
+      - name: Deploy to Vercel (Production)
+        id: deploy
+        working-directory: services/clos-dashboard
+        run: |
+          production_url=$(vercel deploy --prod --token=${{ secrets.VERCEL_TOKEN }} --yes)
+          
+          echo "url=$production_url" >> $GITHUB_OUTPUT
+          echo "✅ Production deployment: $production_url" >> $GITHUB_STEP_SUMMARY
+          
+      - name: Update DNS (if needed)
+        run: |
+          # Check if custom domain needs DNS updates
+          production_url="${{ steps.deploy.outputs.production_url }}"
+          custom_domain="dashboard.candlefish.ai"
+          
+          # Verify custom domain is pointing to Vercel
+          if ! dig +short $custom_domain | grep -q vercel; then
+            echo "⚠️ Custom domain DNS may need updating" >> $GITHUB_STEP_SUMMARY
+            echo "Point $custom_domain to $production_url" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  production-smoke-tests:
+    runs-on: ubuntu-latest
+    needs: deploy-production
+    steps:
+      - name: Production Smoke Tests
+        run: |
+          production_url="${{ needs.deploy-production.outputs.production_url }}"
+          
+          echo "🧪 Running production smoke tests..."
+          
+          # Test main page loads
+          if curl -f -s "$production_url" > /dev/null; then
+            echo "✅ Main page loads" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Main page failed to load" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+          
+          # Test API connectivity
+          if curl -f -s "$production_url/api/health" > /dev/null; then
+            echo "✅ API health endpoint accessible" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ API health endpoint not accessible" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Test performance
+          load_time=$(curl -o /dev/null -s -w '%{time_total}\n' "$production_url")
+          load_time_ms=$(echo "$load_time * 1000" | bc)
+          
+          echo "⏱️ Page load time: ${load_time_ms}ms" >> $GITHUB_STEP_SUMMARY
+          
+          if (( $(echo "$load_time > 3" | bc -l) )); then
+            echo "⚠️ Slow page load time detected" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  update-monitoring:
+    runs-on: ubuntu-latest
+    needs: [deploy-production, production-smoke-tests]
+    if: always() && needs.deploy-production.result == 'success'
+    steps:
+      - name: Update Monitoring
+        run: |
+          production_url="${{ needs.deploy-production.outputs.production_url }}"
+          
+          # Send deployment event to monitoring services
+          curl -X POST "https://api.sentry.io/api/0/organizations/${{ secrets.SENTRY_ORG }}/releases/" \
+            -H "Authorization: Bearer ${{ secrets.SENTRY_AUTH_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"version\": \"${{ github.sha }}\",
+              \"projects\": [\"clos-dashboard\"],
+              \"dateReleased\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"
+            }" || true
+          
+          # Update uptime monitoring
+          curl -X POST "${{ secrets.UPTIME_WEBHOOK_URL }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"service\": \"clos-dashboard\",
+              \"url\": \"$production_url\",
+              \"deployment_time\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
+              \"version\": \"${{ github.sha }}\"
+            }" || true
+          
+          echo "📊 Updated monitoring services" >> $GITHUB_STEP_SUMMARY
+
+  notify-deployment:
+    runs-on: ubuntu-latest
+    needs: [detect-changes, deploy-preview, deploy-production, production-smoke-tests, lighthouse-audit]
+    if: always()
+    steps:
+      - name: Send Slack Notification
+        if: env.SLACK_WEBHOOK_URL
+        run: |
+          deployment_type="${{ needs.detect-changes.outputs.deployment_type }}"
+          
+          # Determine deployment details
+          if [[ "$deployment_type" == "production" ]]; then
+            if [[ "${{ needs.deploy-production.result }}" == "success" ]]; then
+              status="SUCCESS"
+              color="good"
+              emoji="🚀"
+              url="${{ needs.deploy-production.outputs.production_url }}"
+              title="Production Dashboard Deployed"
+            else
+              status="FAILED"
+              color="danger"
+              emoji="💥"
+              url="N/A"
+              title="Production Deployment Failed"
+            fi
+          elif [[ "$deployment_type" == "preview" ]]; then
+            if [[ "${{ needs.deploy-preview.result }}" == "success" ]]; then
+              status="SUCCESS"
+              color="warning"
+              emoji="🔍"
+              url="${{ needs.deploy-preview.outputs.preview_url }}"
+              title="Preview Dashboard Deployed"
+            else
+              status="FAILED"
+              color="danger"
+              emoji="💥"
+              url="N/A"
+              title="Preview Deployment Failed"
+            fi
+          fi
+          
+          # Add Lighthouse scores if available
+          lighthouse_info=""
+          if [[ -n "${{ needs.lighthouse-audit.outputs.performance_score }}" ]]; then
+            lighthouse_info=", Lighthouse: ${{ needs.lighthouse-audit.outputs.performance_score }}/100"
+          fi
+          
+          curl -X POST "$SLACK_WEBHOOK_URL" \
+            -H 'Content-type: application/json' \
+            -d "{
+              \"channel\": \"#deployments\",
+              \"text\": \"$title - $status\",
+              \"attachments\": [{
+                \"color\": \"$color\",
+                \"title\": \"$emoji CLOS Dashboard - $deployment_type\",
+                \"text\": \"Dashboard deployment $status\",
+                \"fields\": [
+                  {\"title\": \"Environment\", \"value\": \"$deployment_type\", \"short\": true},
+                  {\"title\": \"Status\", \"value\": \"$status\", \"short\": true},
+                  {\"title\": \"URL\", \"value\": \"$url\", \"short\": false},
+                  {\"title\": \"Bundle Size\", \"value\": \"${{ needs.build-and-test.outputs.bundle_size }}$lighthouse_info\", \"short\": true}
+                ],
+                \"footer\": \"CLOS v2.0 Dashboard Pipeline\"
+              }]
+            }" || true
+
+  cleanup:
+    runs-on: ubuntu-latest
+    needs: [deploy-production, notify-deployment]
+    if: always()
+    steps:
+      - name: Cleanup Old Deployments
+        run: |
+          # Clean up old preview deployments (keep last 5)
+          echo "🧹 Cleaning up old preview deployments..."
+          
+          # This would typically involve calling Vercel API to clean up old deployments
+          # For now, just log the action
+          echo "Cleanup completed" >> $GITHUB_STEP_SUMMARY

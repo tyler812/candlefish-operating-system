@@ -1,0 +1,203 @@
+# Slack App Manifest for CLOS Bot v2.0
+display_information:
+  name: CLOS Bot
+  description: Candlefish Operating System workflow management bot
+  long_description: |
+    CLOS Bot helps teams manage the Candlefish Operating System (CLOS) workflow directly from Slack. 
+    
+    Features:
+    • Daily unblock sessions with /unblock
+    • WIP limit monitoring with /wip  
+    • Stage gate management with /stage
+    • Idea submission and tracking with /idea
+    • Decision memo creation with /decision
+    • Demo Friday signups with /demo
+    • Performance metrics with /metrics
+    • Personal dashboard in Home tab
+    • Real-time notifications for blockers, WIP violations, and stage gates
+    • GitHub integration for PR and issue tracking
+    • Calendar integration for meeting management
+    
+    Perfect for agile teams using the CLOS methodology for project management.
+  background_color: "#2c3e50"
+  
+features:
+  bot_user:
+    display_name: CLOS Bot
+    always_online: true
+  
+  slash_commands:
+    - command: /unblock
+      url: https://your-domain.com/slack/events
+      description: Start daily unblock session to resolve project blockers
+      usage_hint: Run without parameters to see blocked projects
+      should_escape: false
+      
+    - command: /wip
+      url: https://your-domain.com/slack/events  
+      description: Check current Work-in-Progress status and utilization
+      usage_hint: "[pod-name] [public] - Check specific pod or share publicly"
+      should_escape: false
+      
+    - command: /stage
+      url: https://your-domain.com/slack/events
+      description: Check project stage gates and request advancement
+      usage_hint: "[advance <project-name>] - View gates or request advancement"
+      should_escape: false
+      
+    - command: /idea
+      url: https://your-domain.com/slack/events
+      description: Submit new ideas or view idea pipeline
+      usage_hint: "[list|team] - Submit idea or view existing ideas"
+      should_escape: false
+      
+    - command: /decision
+      url: https://your-domain.com/slack/events
+      description: Create decision memos and track decision-making
+      usage_hint: "[list|team] - Create decision or view existing decisions"
+      should_escape: false
+      
+    - command: /demo
+      url: https://your-domain.com/slack/events
+      description: Sign up for Demo Friday or view demo schedule
+      usage_hint: "[list|cancel] - Sign up, view schedule, or cancel signup"
+      should_escape: false
+      
+    - command: /metrics
+      url: https://your-domain.com/slack/events
+      description: View pod performance metrics and analytics
+      usage_hint: "[pod|overall|personal] - View different metric scopes"
+      should_escape: false
+      
+    - command: /help
+      url: https://your-domain.com/slack/events
+      description: Get help with CLOS Bot commands and features
+      usage_hint: "[command] - Get general help or command-specific help"
+      should_escape: false
+
+  home_tab:
+    home_tab_enabled: true
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+
+oauth_config:
+  scopes:
+    bot:
+      # Basic bot functionality
+      - commands
+      - chat:write
+      - chat:write.public
+      - channels:read
+      - groups:read
+      - im:read
+      - mpim:read
+      
+      # User and team info
+      - users:read
+      - users:read.email
+      - team:read
+      
+      # Home tab and app interactions  
+      - app_mentions:read
+      - channels:history
+      - groups:history
+      - im:history
+      - mpim:history
+      
+      # File and emoji access
+      - files:read
+      - files:write
+      - emoji:read
+      
+      # Reactions and pins
+      - reactions:read
+      - reactions:write
+      - pins:read
+      - pins:write
+      
+      # Workflow and scheduling
+      - workflow.steps:execute
+      - scheduled_messages:write
+
+settings:
+  event_subscriptions:
+    request_url: https://your-domain.com/slack/events
+    bot_events:
+      # Home tab events
+      - app_home_opened
+      - app_mention
+      
+      # Message events for workflow triggers
+      - message.channels
+      - message.groups  
+      - message.im
+      - message.mpim
+      
+      # User and team events
+      - team_join
+      - user_change
+      
+      # Workflow events
+      - workflow_step_execute
+      - workflow_deleted
+      - workflow_published
+      - workflow_unpublished
+
+  interactivity:
+    is_enabled: true
+    request_url: https://your-domain.com/slack/events
+    message_menu_options_url: https://your-domain.com/slack/events
+    
+  org_deploy_enabled: false
+  socket_mode_enabled: true
+  token_rotation_enabled: false
+  
+# Required permissions explanation
+oauth_config:
+  redirect_urls:
+    - https://your-domain.com/slack/oauth_redirect
+    
+  scopes:
+    bot:
+      # Core chat functionality
+      - commands  # Enable slash commands
+      - chat:write  # Send messages as bot
+      - chat:write.public  # Send messages to channels bot isn't in
+      
+      # Channel and conversation access
+      - channels:read  # Access channel information
+      - groups:read  # Access private channel information  
+      - im:read  # Access direct message information
+      - mpim:read  # Access group direct message information
+      - channels:history  # Read channel message history
+      - groups:history  # Read private channel history
+      - im:history  # Read direct message history
+      - mpim:history  # Read group DM history
+      
+      # User and team information
+      - users:read  # Access user profile information
+      - users:read.email  # Access user email addresses
+      - team:read  # Access team information
+      
+      # App interactions
+      - app_mentions:read  # Respond when bot is mentioned
+      
+      # File handling
+      - files:read  # Read file information
+      - files:write  # Upload and share files
+      
+      # Reactions and pins
+      - reactions:read  # Read message reactions
+      - reactions:write  # Add reactions to messages
+      - pins:read  # Read pinned messages
+      - pins:write  # Pin and unpin messages
+      
+      # Workflow integration
+      - workflow.steps:execute  # Execute workflow steps
+      
+      # Scheduling
+      - scheduled_messages:write  # Schedule messages
+      
+      # Additional useful scopes
+      - emoji:read  # Access custom emoji
+      - bookmarks:read  # Read channel bookmarks

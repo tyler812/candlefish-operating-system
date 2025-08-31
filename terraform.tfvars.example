@@ -1,0 +1,128 @@
+# Candlefish Operating System v2.0 - Terraform Configuration Example
+# Copy this file to terraform.tfvars and customize for your environment
+
+# Core Configuration
+project_name = "clos-v2"
+environment  = "prod"  # Options: dev, staging, prod
+aws_region   = "us-east-1"
+owner_email  = "patrick@candlefish.ai"
+
+# Networking Configuration
+vpc_cidr             = "10.0.0.0/16"
+private_subnet_cidrs = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
+public_subnet_cidrs  = ["10.0.101.0/24", "10.0.102.0/24", "10.0.103.0/24"]
+
+# Database Configuration
+db_username            = "clos_admin"
+db_instance_class      = "db.t3.medium"  # Options: db.t3.micro, db.t3.small, db.t3.medium, db.t3.large, db.r5.large, db.r5.xlarge, db.r5.2xlarge
+enable_multi_az        = true
+backup_retention_period = 7  # 7-35 days
+
+# ECS Configuration
+ecs_cpu        = 512   # Options: 256, 512, 1024, 2048, 4096
+ecs_memory     = 1024  # MB
+desired_count  = 2     # Number of tasks per service
+max_capacity   = 6     # Maximum tasks for auto-scaling
+
+# DynamoDB Configuration
+dynamodb_billing_mode   = "PAY_PER_REQUEST"  # Options: PROVISIONED, PAY_PER_REQUEST
+dynamodb_read_capacity  = 5   # Only used with PROVISIONED billing
+dynamodb_write_capacity = 5   # Only used with PROVISIONED billing
+
+# Lambda Configuration
+lambda_timeout     = 300  # seconds (1-900)
+lambda_memory_size = 512  # MB (128-10240)
+
+# Container Images (Update these with your actual ECR URIs after first deployment)
+core_api_image          = "candlefish/clos-core-api:latest"
+workflow_engine_image   = "candlefish/clos-workflow-engine:latest"
+
+# API Keys and Secrets (Store securely - consider using environment variables)
+# These will be stored in AWS Secrets Manager
+github_token         = ""  # GitHub personal access token for webhooks
+slack_token          = ""  # Slack bot token for integration
+auth0_client_secret  = ""  # Auth0 client secret for authentication
+slack_webhook_url    = ""  # Slack webhook URL for notifications
+
+# Domain Configuration (Optional - for custom domain)
+domain_name     = ""  # e.g., "clos.candlefish.ai" - leave empty to use ALB DNS
+certificate_arn = ""  # SSL certificate ARN - leave empty to auto-create
+
+# Feature Flags
+enable_backup             = true
+enable_monitoring         = true
+enable_encryption         = true
+enable_waf               = true
+enable_spot_instances    = false  # Use spot instances for cost savings (non-critical workloads)
+enable_auto_shutdown     = false  # Auto-shutdown for development environments
+enable_cross_region_backup = false  # Cross-region backup for disaster recovery
+
+# Backup Configuration (only used if enable_cross_region_backup = true)
+backup_region = "us-west-2"
+
+# Notification Configuration
+alert_email = "alerts@candlefish.ai"  # Email for CloudWatch alarms
+
+# Production vs Development Settings
+# For production:
+# - Set enable_multi_az = true
+# - Set backup_retention_period = 7 or higher
+# - Set enable_encryption = true
+# - Set enable_waf = true
+# - Use larger instance classes
+
+# For development:
+# - Set enable_multi_az = false
+# - Set backup_retention_period = 1
+# - Set enable_auto_shutdown = true
+# - Set desired_count = 1
+# - Use smaller instance classes like db.t3.micro
+
+#
+# DEPLOYMENT INSTRUCTIONS:
+#
+# 1. Prerequisites:
+#    - AWS CLI configured with appropriate credentials
+#    - Terraform >= 1.5 installed
+#    - Docker installed (for building container images)
+#
+# 2. Initial Setup:
+#    terraform init
+#    terraform plan -var-file=terraform.tfvars
+#    terraform apply -var-file=terraform.tfvars
+#
+# 3. Post-Deployment:
+#    - Build and push your container images to the created ECR repositories
+#    - Update the task definitions with your image URIs
+#    - Configure DNS records if using a custom domain
+#    - Test the API endpoints
+#
+# 4. Monitoring:
+#    - Check the CloudWatch dashboard: https://console.aws.amazon.com/cloudwatch/
+#    - Review CloudWatch alarms and configure notifications
+#    - Monitor costs in AWS Cost Explorer
+#
+# 5. Security:
+#    - Rotate database passwords regularly
+#    - Update API tokens and secrets in AWS Secrets Manager
+#    - Review security groups and access patterns
+#
+# ESTIMATED MONTHLY COSTS (us-east-1):
+# - ECS Fargate (2 services, 2 tasks each): ~$200
+# - RDS Aurora PostgreSQL (db.t3.medium, Multi-AZ): ~$150
+# - DynamoDB (Pay-per-request): ~$50
+# - EventBridge: ~$20
+# - Lambda: ~$30
+# - S3 Storage: ~$10
+# - Data Transfer: ~$20
+# - CloudWatch: ~$15
+# - NAT Gateways: ~$90
+# - Application Load Balancer: ~$25
+# TOTAL ESTIMATED: ~$610/month
+#
+# Cost optimization tips:
+# - Use reserved instances for production RDS
+# - Enable S3 lifecycle policies
+# - Monitor and optimize Lambda execution time
+# - Use VPC endpoints to reduce data transfer costs
+# - Consider using Spot instances for non-critical workloads

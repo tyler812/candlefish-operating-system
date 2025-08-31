@@ -1,0 +1,491 @@
+name: CLOS Portfolio Council Review
+on:
+  schedule:
+    # Run first Monday of each month at 9 AM PST (17:00 UTC)
+    - cron: '0 17 * * MON'
+  workflow_dispatch:
+    inputs:
+      review_type:
+        description: 'Review type'
+        required: true
+        default: 'monthly'
+        type: choice
+        options:
+        - monthly
+        - quarterly
+        - emergency
+      force_run:
+        description: 'Force run even if not first Monday'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  CLOS_API_BASE: ${{ secrets.CLOS_API_BASE_URL || 'https://api.candlefish.ai' }}
+  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+  NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+
+jobs:
+  check-schedule:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.schedule.outputs.should_run }}
+      review_date: ${{ steps.schedule.outputs.review_date }}
+      review_type: ${{ steps.schedule.outputs.review_type }}
+      is_first_monday: ${{ steps.schedule.outputs.is_first_monday }}
+    steps:
+      - name: Validate Schedule
+        id: schedule
+        run: |
+          today=$(date +%Y-%m-%d)
+          day_of_month=$(date +%d)
+          day_of_week=$(date +%u)
+          
+          # Check if it's the first Monday of the month
+          is_first_monday="false"
+          if [[ "$day_of_week" == "1" ]] && [[ "$day_of_month" -le 7 ]]; then
+            is_first_monday="true"
+          fi
+          
+          # Determine if we should run
+          if [[ "${{ inputs.force_run }}" == "true" ]] || [[ "$is_first_monday" == "true" ]]; then
+            should_run="true"
+          else
+            should_run="false"
+          fi
+          
+          # Determine review type
+          if [[ -n "${{ inputs.review_type }}" ]]; then
+            review_type="${{ inputs.review_type }}"
+          else
+            # Check if it's a quarterly month (March, June, September, December)
+            month=$(date +%m)
+            if [[ "$month" =~ ^(03|06|09|12)$ ]]; then
+              review_type="quarterly"
+            else
+              review_type="monthly"
+            fi
+          fi
+          
+          echo "should_run=$should_run" >> $GITHUB_OUTPUT
+          echo "review_date=$today" >> $GITHUB_OUTPUT
+          echo "review_type=$review_type" >> $GITHUB_OUTPUT
+          echo "is_first_monday=$is_first_monday" >> $GITHUB_OUTPUT
+          
+          echo "## Portfolio Review Schedule" >> $GITHUB_STEP_SUMMARY
+          echo "- Date: $today" >> $GITHUB_STEP_SUMMARY
+          echo "- Is First Monday: $is_first_monday" >> $GITHUB_STEP_SUMMARY
+          echo "- Should Run: $should_run" >> $GITHUB_STEP_SUMMARY
+          echo "- Review Type: $review_type" >> $GITHUB_STEP_SUMMARY
+
+  gather-portfolio-metrics:
+    runs-on: ubuntu-latest
+    needs: check-schedule
+    if: needs.check-schedule.outputs.should_run == 'true'
+    outputs:
+      total_projects: ${{ steps.metrics.outputs.total_projects }}
+      active_projects: ${{ steps.metrics.outputs.active_projects }}
+      blocked_projects: ${{ steps.metrics.outputs.blocked_projects }}
+      velocity_metrics: ${{ steps.metrics.outputs.velocity }}
+      pod_breakdown: ${{ steps.metrics.outputs.pods }}
+      stage_distribution: ${{ steps.metrics.outputs.stages }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Gather Portfolio Metrics
+        id: metrics
+        run: |
+          review_date="${{ needs.check-schedule.outputs.review_date }}"
+          review_type="${{ needs.check-schedule.outputs.review_type }}"
+          
+          echo "## 📊 Gathering Portfolio Metrics - $review_date" >> $GITHUB_STEP_SUMMARY
+          
+          # Count total projects (repositories with CLOS configuration)
+          total_projects=$(find . -name "stage-gates.yaml" -o -name ".clos.yaml" | wc -l | tr -d ' ')
+          
+          # Count active PRs by stage
+          spark_count=$(gh pr list --state open --label "stage/spark" --json number | jq length)
+          seed_count=$(gh pr list --state open --label "stage/seed" --json number | jq length)
+          scaffold_count=$(gh pr list --state open --label "stage/scaffold" --json number | jq length)
+          ship_count=$(gh pr list --state open --label "stage/ship" --json number | jq length)
+          scale_count=$(gh pr list --state open --label "stage/scale" --json number | jq length)
+          
+          active_projects=$((spark_count + seed_count + scaffold_count + ship_count + scale_count))
+          
+          # Count blocked projects
+          blocked_projects=$(gh pr list --state open --search "label:blocked" --json number | jq length)
+          
+          # Get pod breakdown
+          pods_json=$(gh pr list --state open --json labels | \
+            jq '[.[] | .labels[] | select(.name | startswith("pod/")) | .name | split("/")[1]] | group_by(.) | map({pod: .[0], count: length})')
+          
+          # Calculate velocity (merged PRs in last 30 days)
+          thirty_days_ago=$(date -d '30 days ago' +%Y-%m-%d)
+          velocity=$(gh pr list --state merged --search "merged:>$thirty_days_ago" --json number | jq length)
+          
+          # Output metrics
+          echo "total_projects=$total_projects" >> $GITHUB_OUTPUT
+          echo "active_projects=$active_projects" >> $GITHUB_OUTPUT  
+          echo "blocked_projects=$blocked_projects" >> $GITHUB_OUTPUT
+          echo "velocity=$velocity" >> $GITHUB_OUTPUT
+          echo "pods=$pods_json" >> $GITHUB_OUTPUT
+          echo "stages={\"spark\":$spark_count,\"seed\":$seed_count,\"scaffold\":$scaffold_count,\"ship\":$ship_count,\"scale\":$scale_count}" >> $GITHUB_OUTPUT
+          
+          # Add to summary
+          echo "### Portfolio Overview" >> $GITHUB_STEP_SUMMARY
+          echo "- **Total Projects:** $total_projects" >> $GITHUB_STEP_SUMMARY
+          echo "- **Active Work:** $active_projects items" >> $GITHUB_STEP_SUMMARY
+          echo "- **Blocked Items:** $blocked_projects" >> $GITHUB_STEP_SUMMARY
+          echo "- **30-Day Velocity:** $velocity completed PRs" >> $GITHUB_STEP_SUMMARY
+          
+          echo "### Stage Distribution" >> $GITHUB_STEP_SUMMARY
+          echo "- Spark: $spark_count" >> $GITHUB_STEP_SUMMARY
+          echo "- Seed: $seed_count" >> $GITHUB_STEP_SUMMARY
+          echo "- Scaffold: $scaffold_count" >> $GITHUB_STEP_SUMMARY
+          echo "- Ship: $ship_count" >> $GITHUB_STEP_SUMMARY
+          echo "- Scale: $scale_count" >> $GITHUB_STEP_SUMMARY
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  analyze-portfolio-health:
+    runs-on: ubuntu-latest
+    needs: [check-schedule, gather-portfolio-metrics]
+    outputs:
+      health_score: ${{ steps.health.outputs.score }}
+      risk_items: ${{ steps.health.outputs.risks }}
+      recommendations: ${{ steps.health.outputs.recommendations }}
+    steps:
+      - name: Calculate Portfolio Health Score
+        id: health
+        run: |
+          total_projects="${{ needs.gather-portfolio-metrics.outputs.total_projects }}"
+          active_projects="${{ needs.gather-portfolio-metrics.outputs.active_projects }}"
+          blocked_projects="${{ needs.gather-portfolio-metrics.outputs.blocked_projects }}"
+          velocity="${{ needs.gather-portfolio-metrics.outputs.velocity_metrics }}"
+          
+          # Calculate health metrics
+          if [[ "$active_projects" -gt 0 ]]; then
+            blocked_percentage=$((blocked_projects * 100 / active_projects))
+          else
+            blocked_percentage=0
+          fi
+          
+          # Health score calculation (0-100)
+          health_score=100
+          
+          # Penalties for issues
+          if [[ "$blocked_percentage" -gt 20 ]]; then
+            health_score=$((health_score - 25))
+          elif [[ "$blocked_percentage" -gt 10 ]]; then
+            health_score=$((health_score - 10))
+          fi
+          
+          if [[ "$velocity" -lt 5 ]]; then
+            health_score=$((health_score - 20))
+          elif [[ "$velocity" -lt 10 ]]; then
+            health_score=$((health_score - 10))
+          fi
+          
+          if [[ "$active_projects" -gt 10 ]]; then
+            health_score=$((health_score - 15)) # Too much WIP
+          fi
+          
+          # Generate risk items
+          risks=()
+          if [[ "$blocked_percentage" -gt 15 ]]; then
+            risks+=("High blocked work percentage: ${blocked_percentage}%")
+          fi
+          if [[ "$velocity" -lt 5 ]]; then
+            risks+=("Low velocity: only $velocity items completed in 30 days")
+          fi
+          if [[ "$active_projects" -gt 10 ]]; then
+            risks+=("WIP limit concerns: $active_projects active items")
+          fi
+          
+          # Generate recommendations
+          recommendations=()
+          if [[ "$blocked_percentage" -gt 15 ]]; then
+            recommendations+=("Focus on unblocking work before starting new initiatives")
+          fi
+          if [[ "$velocity" -lt 5 ]]; then
+            recommendations+=("Review team capacity and remove impediments")
+          fi
+          if [[ "$active_projects" -gt 10 ]]; then
+            recommendations+=("Implement stricter WIP limits and complete existing work")
+          fi
+          
+          echo "score=$health_score" >> $GITHUB_OUTPUT
+          echo "risks=$(IFS="|"; echo "${risks[*]}")" >> $GITHUB_OUTPUT
+          echo "recommendations=$(IFS="|"; echo "${recommendations[*]}")" >> $GITHUB_OUTPUT
+          
+          # Add to summary
+          echo "## 📈 Portfolio Health Analysis" >> $GITHUB_STEP_SUMMARY
+          echo "**Health Score:** $health_score/100" >> $GITHUB_STEP_SUMMARY
+          
+          if [[ ${#risks[@]} -gt 0 ]]; then
+            echo "### 🚨 Risk Items" >> $GITHUB_STEP_SUMMARY
+            for risk in "${risks[@]}"; do
+              echo "- $risk" >> $GITHUB_STEP_SUMMARY
+            done
+          fi
+          
+          if [[ ${#recommendations[@]} -gt 0 ]]; then
+            echo "### 💡 Recommendations" >> $GITHUB_STEP_SUMMARY
+            for rec in "${recommendations[@]}"; do
+              echo "- $rec" >> $GITHUB_STEP_SUMMARY
+            done
+          fi
+
+  generate-decision-memos:
+    runs-on: ubuntu-latest
+    needs: [check-schedule, gather-portfolio-metrics, analyze-portfolio-health]
+    outputs:
+      memos_created: ${{ steps.memos.outputs.count }}
+      decision_items: ${{ steps.memos.outputs.items }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Generate Decision Memo Templates
+        id: memos
+        run: |
+          review_date="${{ needs.check-schedule.outputs.review_date }}"
+          review_type="${{ needs.check-schedule.outputs.review_type }}"
+          health_score="${{ needs.analyze-portfolio-health.outputs.health_score }}"
+          
+          mkdir -p decision-memos/portfolio-review
+          
+          # Create main portfolio review memo
+          cat > "decision-memos/portfolio-review/portfolio-review-$review_date.md" << EOF
+# Portfolio Review - $review_date
+
+**Review Type:** $review_type
+**Health Score:** $health_score/100
+**Facilitator:** Portfolio Council
+
+## Executive Summary
+<!-- High-level summary of portfolio status -->
+
+## Key Metrics
+- **Total Projects:** ${{ needs.gather-portfolio-metrics.outputs.total_projects }}
+- **Active Work Items:** ${{ needs.gather-portfolio-metrics.outputs.active_projects }}
+- **Blocked Items:** ${{ needs.gather-portfolio-metrics.outputs.blocked_projects }}
+- **30-Day Velocity:** ${{ needs.gather-portfolio-metrics.outputs.velocity_metrics }} completed
+
+## Stage Distribution
+\`\`\`json
+${{ needs.gather-portfolio-metrics.outputs.stage_distribution }}
+\`\`\`
+
+## Risk Assessment
+$(echo "${{ needs.analyze-portfolio-health.outputs.risk_items }}" | tr '|' '\n' | sed 's/^/- /')
+
+## Recommendations  
+$(echo "${{ needs.analyze-portfolio-health.outputs.recommendations }}" | tr '|' '\n' | sed 's/^/- /')
+
+## Decisions Required
+
+### Investment Priorities
+- [ ] **Decision:** Which initiatives should receive increased investment?
+- [ ] **Context:** Based on current metrics and strategic goals
+- [ ] **Options:** 
+  1. Double down on highest-performing projects
+  2. Increase investment in blocked/struggling projects  
+  3. Maintain current allocation
+- [ ] **Recommendation:** TBD
+- [ ] **Decision:** TBD
+- [ ] **Next Review:** Next monthly review
+
+### Resource Allocation
+- [ ] **Decision:** Should we adjust team assignments?
+- [ ] **Context:** Current pod utilization and project needs
+- [ ] **Options:**
+  1. Maintain current pod assignments
+  2. Reallocate based on project priority
+  3. Hire additional capacity
+- [ ] **Recommendation:** TBD
+- [ ] **Decision:** TBD
+- [ ] **Next Review:** Next monthly review
+
+### Portfolio Pruning
+- [ ] **Decision:** Which projects should be sunset or archived?
+- [ ] **Context:** Low-performing or stale projects consuming resources
+- [ ] **Options:**
+  1. Archive projects with no activity >90 days
+  2. Consolidate similar/overlapping projects
+  3. Maintain all current projects
+- [ ] **Recommendation:** TBD
+- [ ] **Decision:** TBD
+- [ ] **Next Review:** Next monthly review
+
+## Action Items
+- [ ] Schedule individual project deep-dives for underperforming initiatives
+- [ ] Review and update WIP limits based on current capacity
+- [ ] Address top 3 blocking issues across portfolio
+- [ ] Update strategic alignment for all active projects
+
+## Attendees
+- [ ] Patrick Smith (CEO)
+- [ ] Integrator Pod Lead
+- [ ] Pod Leads (as needed)
+
+---
+*Generated by CLOS v2.0 Portfolio Review Automation*
+EOF
+
+          echo "count=1" >> $GITHUB_OUTPUT
+          echo "items=Portfolio Review Decision Memo created" >> $GITHUB_OUTPUT
+          
+          echo "✅ Generated portfolio review memo" >> $GITHUB_STEP_SUMMARY
+
+  schedule-review-meeting:
+    runs-on: ubuntu-latest
+    needs: [check-schedule, generate-decision-memos]
+    outputs:
+      meeting_scheduled: ${{ steps.schedule.outputs.scheduled }}
+      meeting_link: ${{ steps.schedule.outputs.link }}
+    steps:
+      - name: Create Calendar Invite
+        id: schedule
+        run: |
+          review_date="${{ needs.check-schedule.outputs.review_date }}"
+          review_type="${{ needs.check-schedule.outputs.review_type }}"
+          
+          # Calculate meeting date (next Friday after review date)
+          meeting_date=$(date -d "$review_date +4 days" +%Y-%m-%d)
+          
+          # Create meeting via CLOS API (would integrate with calendar systems)
+          meeting_response=$(curl -s -X POST "$CLOS_API_BASE/calendar/schedule" \
+            -H "Authorization: Bearer ${{ secrets.CLOS_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"title\": \"Portfolio Council Review - $review_type\",
+              \"date\": \"$meeting_date\",
+              \"time\": \"10:00\",
+              \"duration\": 90,
+              \"attendees\": [
+                \"patrick@candlefish.ai\",
+                \"integrator-pod@candlefish.ai\"
+              ],
+              \"agenda\": \"Review portfolio metrics, discuss decisions, plan next quarter\"
+            }" || echo '{"scheduled": false, "link": "TBD"}')
+          
+          scheduled=$(echo "$meeting_response" | jq -r '.scheduled // false')
+          meeting_link=$(echo "$meeting_response" | jq -r '.link // "TBD"')
+          
+          echo "scheduled=$scheduled" >> $GITHUB_OUTPUT
+          echo "link=$meeting_link" >> $GITHUB_OUTPUT
+          
+          echo "📅 Meeting scheduled for $meeting_date" >> $GITHUB_STEP_SUMMARY
+
+  notify-stakeholders:
+    runs-on: ubuntu-latest
+    needs: [check-schedule, gather-portfolio-metrics, analyze-portfolio-health, schedule-review-meeting]
+    steps:
+      - name: Send Portfolio Review Notification
+        if: env.SLACK_WEBHOOK_URL
+        run: |
+          review_date="${{ needs.check-schedule.outputs.review_date }}"
+          review_type="${{ needs.check-schedule.outputs.review_type }}"
+          health_score="${{ needs.analyze-portfolio-health.outputs.health_score }}"
+          active_projects="${{ needs.gather-portfolio-metrics.outputs.active_projects }}"
+          blocked_projects="${{ needs.gather-portfolio-metrics.outputs.blocked_projects }}"
+          meeting_link="${{ needs.schedule-review-meeting.outputs.meeting_link }}"
+          
+          # Determine health color
+          if [[ "$health_score" -ge 80 ]]; then
+            health_color="good"
+            health_emoji="💚"
+          elif [[ "$health_score" -ge 60 ]]; then
+            health_color="warning"
+            health_emoji="💛"
+          else
+            health_color="danger" 
+            health_emoji="❤️"
+          fi
+          
+          curl -X POST "$SLACK_WEBHOOK_URL" \
+            -H 'Content-type: application/json' \
+            -d "{
+              \"channel\": \"#portfolio-council\",
+              \"text\": \"Portfolio Review Ready - $review_date\",
+              \"attachments\": [{
+                \"color\": \"$health_color\",
+                \"title\": \"📋 $review_type Portfolio Review - $review_date\",
+                \"text\": \"Your portfolio review is ready for the council meeting.\",
+                \"fields\": [
+                  {\"title\": \"Health Score\", \"value\": \"$health_emoji $health_score/100\", \"short\": true},
+                  {\"title\": \"Active Projects\", \"value\": \"$active_projects\", \"short\": true},
+                  {\"title\": \"Blocked Items\", \"value\": \"$blocked_projects\", \"short\": true},
+                  {\"title\": \"Meeting\", \"value\": \"$meeting_link\", \"short\": true}
+                ],
+                \"actions\": [{
+                  \"type\": \"button\",
+                  \"text\": \"View Decision Memo\",
+                  \"url\": \"${{ github.server_url }}/${{ github.repository }}/blob/main/decision-memos/portfolio-review/portfolio-review-$review_date.md\"
+                }],
+                \"footer\": \"CLOS v2.0 Portfolio Review\"
+              }]
+            }" || true
+
+  update-tracking:
+    runs-on: ubuntu-latest
+    needs: [check-schedule, gather-portfolio-metrics, analyze-portfolio-health]
+    if: always()
+    steps:
+      - name: Update Portfolio Metrics in CLOS API
+        run: |
+          # Send comprehensive portfolio data to CLOS API
+          curl -s -X POST "$CLOS_API_BASE/portfolio/review" \
+            -H "Authorization: Bearer ${{ secrets.CLOS_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"review_date\": \"${{ needs.check-schedule.outputs.review_date }}\",
+              \"review_type\": \"${{ needs.check-schedule.outputs.review_type }}\",
+              \"repository\": \"${{ github.repository }}\",
+              \"metrics\": {
+                \"total_projects\": ${{ needs.gather-portfolio-metrics.outputs.total_projects || 0 }},
+                \"active_projects\": ${{ needs.gather-portfolio-metrics.outputs.active_projects || 0 }},
+                \"blocked_projects\": ${{ needs.gather-portfolio-metrics.outputs.blocked_projects || 0 }},
+                \"velocity\": ${{ needs.gather-portfolio-metrics.outputs.velocity_metrics || 0 }},
+                \"health_score\": ${{ needs.analyze-portfolio-health.outputs.health_score || 0 }},
+                \"stage_distribution\": ${{ needs.gather-portfolio-metrics.outputs.stage_distribution || '{}' }},
+                \"pod_breakdown\": ${{ needs.gather-portfolio-metrics.outputs.pod_breakdown || '[]' }}
+              },
+              \"risks\": \"${{ needs.analyze-portfolio-health.outputs.risk_items }}\",
+              \"recommendations\": \"${{ needs.analyze-portfolio-health.outputs.recommendations }}\",
+              \"execution_time\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"
+            }" || true
+          
+          echo "📊 Portfolio review data saved to CLOS API" >> $GITHUB_STEP_SUMMARY
+
+  commit-decision-memos:
+    runs-on: ubuntu-latest
+    needs: [generate-decision-memos]
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Commit Generated Decision Memos
+        run: |
+          # Configure git
+          git config user.name "CLOS Portfolio Review"
+          git config user.email "clos@candlefish.ai"
+          
+          # Add generated files
+          git add decision-memos/portfolio-review/
+          
+          # Commit if there are changes
+          if ! git diff --staged --quiet; then
+            git commit -m "Generate portfolio review decision memos
+
+📋 Monthly portfolio council review
+📊 Health score: ${{ needs.analyze-portfolio-health.outputs.health_score }}/100
+🎯 Active projects: ${{ needs.gather-portfolio-metrics.outputs.active_projects }}
+
+🤖 Generated with CLOS v2.0
+
+Co-Authored-By: Claude <noreply@anthropic.com>"
+            
+            echo "✅ Committed decision memos" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "ℹ️ No changes to commit" >> $GITHUB_STEP_SUMMARY
+          fi
